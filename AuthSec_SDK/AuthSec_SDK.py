@@ -10,12 +10,12 @@ import inspect
 import sys
 import uvicorn
 import signal
-import atexit
 from typing import Dict, Optional, List, Callable, Any
 from functools import wraps
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from dataclasses import dataclass
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,14 +25,27 @@ _config = {
     "client_id": None,
     "app_name": None,
     "auth_service_url": "https://dev.api.authsec.dev/sdkmgr/mcp-auth",
+    "services_base_url": "https://dev.api.authsec.dev/sdkmgr/services",
     "timeout": 10,
     "retries": 3
 }
+
+@dataclass
+class ServiceCredentials:
+    service_id: str
+    service_name: str
+    service_type: str
+    auth_type: str
+    url: str
+    credentials: Dict[str, Any]
+    metadata: Dict[str, str]
+    retrieved_at: str
 
 def configure_auth(
     client_id: str,
     app_name: str,
     auth_service_url: Optional[str] = None,
+    services_base_url: Optional[str] = None,
     timeout: int = 10,
     retries: int = 3
 ):
@@ -55,8 +68,12 @@ def configure_auth(
     if auth_service_url:
         _config["auth_service_url"] = auth_service_url.rstrip('/')
     
+    if services_base_url:
+        _config["services_base_url"] = services_base_url.rstrip('/')
+    
     print(f"Auth configured: {app_name} with client_id: {client_id[:8]}...")
     print(f"Auth service URL: {_config['auth_service_url']}")
+    print(f"Services URL: {_config['services_base_url']}")
 
 async def _make_auth_request(endpoint: str, payload: Dict[str, Any] = None, method: str = "POST") -> Dict[str, Any]: #type: ignore
     """Make HTTP request to SDK Manager auth service."""
@@ -105,9 +122,64 @@ async def _make_auth_request(endpoint: str, payload: Dict[str, Any] = None, meth
         "message": "Could not complete authentication check"
     }
 
+async def _make_services_request(endpoint: str, payload: Dict[str, Any] = None, method: str = "POST") -> Dict[str, Any]: #type: ignore
+    """Make HTTP request to SDK Manager services."""
+    if not _config["client_id"]:
+        raise RuntimeError("Authentication not configured. Call configure_auth() first.")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "X-Client-ID": _config["client_id"],
+        "X-App-Name": _config["app_name"]
+    }
+    
+    timeout = aiohttp.ClientTimeout(total=_config["timeout"] * 2)  # Services may take longer
+    
+    for attempt in range(_config["retries"]):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if method == "GET":
+                    async with session.get(
+                        f"{_config['services_base_url']}/{endpoint}",
+                        headers=headers
+                    ) as response:
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            return {"error": f"HTTP {response.status}: {error_text}"}
+                        return await response.json()
+                else:
+                    async with session.post(
+                        f"{_config['services_base_url']}/{endpoint}",
+                        json=payload,
+                        headers=headers
+                    ) as response:
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            return {"error": f"HTTP {response.status}: {error_text}"}
+                        return await response.json()
+        
+        except Exception as e:
+            if attempt < _config["retries"] - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            
+            return {
+                "error": "Connection error",
+                "message": f"Failed to connect to services: {str(e)}"
+            }
+    
+    return {
+        "error": "Max retries exceeded",
+        "message": "Could not complete services request"
+    }
+
 def protected_by_AuthSec(tool_name: str):
     """Decorator to protect tools via SDK Manager auth service API."""
     def decorator(func: Callable) -> Callable:
+        # Check if function expects 'session' parameter
+        sig = inspect.signature(func)
+        expects_session = 'session' in sig.parameters
+        
         @wraps(func)
         async def wrapper(arguments: dict) -> list:
             # Extract session ID from arguments
@@ -143,26 +215,53 @@ def protected_by_AuthSec(tool_name: str):
             # Add user info to arguments for the business function
             arguments["_user_info"] = protection_result.get("user_info", {})
             
-            # Call the original business function
-            try:
-                result = await func(arguments)
-                return result
-            except Exception as e:
-                return [{
-                    "type": "text",
-                    "text": json.dumps({
-                        "error": "Tool execution failed",
-                        "message": f"Internal error in {tool_name}: {str(e)}",
-                        "tool": tool_name
-                    })
-                }]
+            # Create session object if function expects it
+            if expects_session:
+                # Create a simple session object with required attributes
+                class SimpleSession:
+                    def __init__(self, session_id: str, user_info: Dict):
+                        self.session_id = session_id
+                        self.access_token = user_info.get("access_token")
+                        self.tenant_id = user_info.get("tenant_id")
+                        self.user_id = user_info.get("user_id")
+                        self.org_id = user_info.get("org_id")
+                
+                session_obj = SimpleSession(session_id, protection_result.get("user_info", {}))
+                
+                # Call the original business function with session
+                try:
+                    result = await func(arguments, session_obj)
+                    return result
+                except Exception as e:
+                    return [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "error": "Tool execution failed",
+                            "message": f"Internal error in {tool_name}: {str(e)}",
+                            "tool": tool_name
+                        })
+                    }]
+            else:
+                # Call the original business function without session
+                try:
+                    result = await func(arguments)
+                    return result
+                except Exception as e:
+                    return [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "error": "Tool execution failed",
+                            "message": f"Internal error in {tool_name}: {str(e)}",
+                            "tool": tool_name
+                        })
+                    }]
         
         return wrapper
     return decorator
 
-# ===========================================================================
-# MCP SERVER IMPLEMENTATION
-# ===========================================================================
+# ===========================
+# =MCP SERVER IMPLEMENTATION=
+# ===========================
 
 class MCPServer:
     """Minimal MCP server that delegates to hosted SDK Manager"""
@@ -238,7 +337,8 @@ class MCPServer:
                 "version": "1.0.0",
                 "protocol": "mcp-with-oauth",
                 "status": "running",
-                "auth_service": _config["auth_service_url"]
+                "auth_service": _config["auth_service_url"],
+                "services_url": _config["services_base_url"]
             }
         
         @self.app.post("/")
@@ -323,6 +423,7 @@ def run_mcp_server_with_oauth(user_module, client_id: str, app_name: str, host: 
         
         print(f"Starting {app_name} MCP Server on {host}:{port}")
         print(f"Authentication via: {_config['auth_service_url']}")
+        print(f"Services via: {_config['services_base_url']}")
         print(f"MCP Inspector: npx @modelcontextprotocol/inspector http://{host}:{port}")
         
         config = uvicorn.Config(server.app, host=host, port=port, log_level="info")
@@ -352,3 +453,86 @@ async def test_auth_service():
     except Exception as e:
         print(f"Failed to connect to auth service: {str(e)}")
         return False
+
+async def test_services():
+    """Test connection to services"""
+    try:
+        result = await _make_services_request("health", method="GET")
+        print(f"Services are running: {result}")
+        return result.get("status") == "healthy"
+    except Exception as e:
+        print(f"Failed to connect to services: {str(e)}")
+        return False
+    
+# ================================
+# =Services SERVER IMPLEMENTATION=
+# ================================
+
+class ServiceAccessError(Exception):
+    """Base exception for service access errors"""
+    pass
+
+class ServiceAccessSDK:
+    """Minimal SDK that delegates to hosted services"""
+    
+    def __init__(self, session, timeout: int = 30):
+        """Initialize SDK with session data"""
+        # Extract session_id from OAuth session object
+        if hasattr(session, 'session_id'):
+            self.session_id = session.session_id
+        elif isinstance(session, dict) and 'session_id' in session:
+            self.session_id = session['session_id']
+        else:
+            raise ValueError("Session must contain session_id")
+        
+        # Store session for metadata
+        self.session = session
+        self.timeout = timeout
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Check service health via hosted service"""
+        return await _make_services_request("health", method="GET")
+    
+    async def get_service_credentials(self, service_name: str) -> ServiceCredentials:
+        """Get service credentials via hosted service"""
+        payload = {
+            "session_id": self.session_id,
+            "service_name": service_name
+        }
+        
+        result = await _make_services_request("credentials", payload)
+        
+        if "error" in result:
+            raise ServiceAccessError(result["error"])
+        
+        return ServiceCredentials(
+            service_id=result['service_id'],
+            service_name=result['service_name'],
+            service_type=result['service_type'],
+            auth_type=result['auth_type'],
+            url=result['url'],
+            credentials=result['credentials'],
+            metadata=result.get('metadata', {}),
+            retrieved_at=result['retrieved_at']
+        )
+    
+    async def get_service_token(self, service_name: str) -> str:
+        """Get access token for service"""
+        credentials = await self.get_service_credentials(service_name)
+        token = credentials.credentials.get('access_token')
+        if not token:
+            raise ServiceAccessError(f"No access token available for {service_name}")
+        return token
+    
+    async def get_service_user_details(self, service_name: str) -> Dict[str, Any]:
+        """Get JWT payload details via hosted service"""
+        payload = {
+            "session_id": self.session_id,
+            "service_name": service_name
+        }
+        
+        return await _make_services_request("user-details", payload)
+    
+    async def close(self):
+        """Close SDK (no-op in this minimal implementation)"""
+        pass
