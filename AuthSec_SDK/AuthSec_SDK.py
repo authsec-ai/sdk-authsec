@@ -416,9 +416,9 @@ class MCPServer:
 
 def run_mcp_server_with_oauth(user_module, client_id: str, app_name: str, host: str = "0.0.0.0", port: int = 3005):
     """Run MCP server using SDK Manager for auth"""
-    configure_auth(client_id, app_name)
+    configure_auth((client_id+"-main-client"), app_name)
     async def _run():
-        server = MCPServer(client_id, app_name)
+        server = MCPServer((client_id+"-main-client"), app_name)
         server.set_user_module(user_module)
         
         print(f"Starting {app_name} MCP Server on {host}:{port}")
