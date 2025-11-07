@@ -554,7 +554,7 @@ That's it. Your tools are now protected by enterprise-grade security.
 - **Blogs**: [docs.authsec.dev](https://authsec.dev/blogs)
 - **Dashboard**: [app.authsec.dev](https://app.authsec.dev)
 - **GitHub**: [github.com/authsec-ai/sdk-authsec](https://github.com/authsec-ai/sdk-authsec.git)
-- **Support**: support@authnull.com
+- **Support**: support@authsec.dev
 
 ---
 
