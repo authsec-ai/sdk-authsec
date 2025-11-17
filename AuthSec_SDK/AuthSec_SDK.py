@@ -173,6 +173,42 @@ async def _make_services_request(endpoint: str, payload: Dict[str, Any] = None, 
         "message": "Could not complete services request"
     }
 
+def mcp_tool(
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    inputSchema: Optional[Dict[str, Any]] = None
+):
+    """
+    Decorator for standard MCP tools (no authentication required).
+
+    This is a lightweight decorator for tools that don't need authentication.
+    It allows you to specify the tool's description and inputSchema.
+
+    Args:
+        name: Tool name (uses function name if not provided)
+        description: Tool description (uses docstring if not provided)
+        inputSchema: MCP-compliant input schema (optional)
+
+    Example:
+        @mcp_tool(description="Echo a message", inputSchema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Message to echo"}
+            },
+            "required": ["message"]
+        })
+        async def echo(arguments: dict) -> list:
+            return [{"type": "text", "text": arguments.get("message", "")}]
+    """
+    def decorator(func: Callable) -> Callable:
+        # Store metadata on the function
+        func._mcp_tool_name = name
+        func._mcp_tool_description = description
+        func._mcp_tool_inputSchema = inputSchema
+        return func
+    return decorator
+
+
 def protected_by_AuthSec(
     tool_name: str,
     roles: Optional[List[str]] = None,
@@ -180,7 +216,9 @@ def protected_by_AuthSec(
     resources: Optional[List[str]] = None,
     scopes: Optional[List[str]] = None,
     permissions: Optional[List[str]] = None,
-    require_all: bool = False
+    require_all: bool = False,
+    description: Optional[str] = None,
+    inputSchema: Optional[Dict[str, Any]] = None
 ):
     """
     Decorator to protect tools via SDK Manager auth service API with optional RBAC.
@@ -193,6 +231,8 @@ def protected_by_AuthSec(
         scopes: List of scope names user must have (e.g., ["read", "write"])
         permissions: List of permission names user must have
         require_all: If True, user must satisfy ALL conditions. If False, ANY condition is sufficient.
+        description: Optional description of the tool (uses function docstring if not provided)
+        inputSchema: Optional MCP-compliant input schema (JSON Schema format)
 
     RBAC Validation:
         - If no RBAC parameters are provided, only authentication is required
@@ -205,10 +245,11 @@ def protected_by_AuthSec(
         @protected_by_AuthSec("calculator", roles=["admin", "user"])
         @protected_by_AuthSec("file_upload", roles=["admin"], scopes=["write"])
         @protected_by_AuthSec("analytics", roles=["manager"], resources=["projects"], scopes=["read"])
+        @protected_by_AuthSec("notes_manager", description="Manage notes", inputSchema={...})
     """
     def decorator(func: Callable) -> Callable:
         # Store RBAC requirements as metadata on the function
-        func._rbac_requirements = { #type: ignore
+        func._rbac_requirements = {
             "roles": roles or [],
             "groups": groups or [],
             "resources": resources or [],
@@ -216,6 +257,10 @@ def protected_by_AuthSec(
             "permissions": permissions or [],
             "require_all": require_all
         }
+
+        # Store optional description and inputSchema
+        func._tool_description = description
+        func._tool_inputSchema = inputSchema
 
         # Check if function expects 'session' parameter
         sig = inspect.signature(func)
@@ -298,7 +343,7 @@ def protected_by_AuthSec(
                     }]
 
         # Copy RBAC requirements to wrapper for introspection
-        wrapper._rbac_requirements = func._rbac_requirements #type: ignore
+        wrapper._rbac_requirements = func._rbac_requirements
 
         return wrapper
     return decorator
@@ -313,8 +358,9 @@ class MCPServer:
     def __init__(self, client_id: str, app_name: str):
         self.client_id = client_id
         self.app_name = app_name
-        self.user_tools: List[Dict[str, Any]] = []  # Changed to store tool metadata with RBAC
-        self.tool_handlers: Dict[str, Callable] = {}
+        self.user_tools: List[Dict[str, Any]] = []  # Protected tools with RBAC metadata
+        self.unprotected_tools: List[Dict[str, Any]] = []  # Unprotected tools (standard MCP)
+        self.tool_handlers: Dict[str, Callable] = {}  # All tool handlers (both protected and unprotected)
 
         self.app = FastAPI(title=app_name, version="1.0.0")
         self.app.add_middleware(
@@ -362,30 +408,96 @@ class MCPServer:
         signal.signal(signal.SIGTERM, signal_handler)
 
     def set_user_module(self, module):
-        """Discover protected tools from user module with RBAC metadata"""
+        """
+        Discover tools from user module (both protected and unprotected).
+
+        Protected tools (with @protected_by_AuthSec decorator):
+        - Sent to SDK Manager with RBAC metadata
+        - Require authentication and RBAC validation
+
+        Unprotected tools (without decorator):
+        - Registered as standard MCP tools
+        - No authentication required
+        - Work like normal MCP tools
+        """
         for name, obj in inspect.getmembers(module):
-            if (inspect.iscoroutinefunction(obj) and
-                hasattr(obj, '__wrapped__') and
-                not name.startswith('_')):
+            if inspect.iscoroutinefunction(obj) and not name.startswith('_'):
+                # Check if this is a protected tool (has @protected_by_AuthSec decorator)
+                is_protected = hasattr(obj, '__wrapped__') and hasattr(obj, '_rbac_requirements')
 
-                # Extract RBAC requirements if they exist
-                rbac_requirements = getattr(obj, '_rbac_requirements', {
-                    "roles": [],
-                    "groups": [],
-                    "resources": [],
-                    "scopes": [],
-                    "permissions": [],
-                    "require_all": False
-                })
+                # Check if this is an unprotected MCP tool (has @mcp_tool decorator)
+                is_mcp_tool = hasattr(obj, '_mcp_tool_name') or hasattr(obj, '_mcp_tool_description') or hasattr(obj, '_mcp_tool_inputSchema')
 
-                # Store tool with its RBAC metadata
-                tool_metadata = {
-                    "name": name,
-                    "rbac": rbac_requirements
-                }
+                # IMPORTANT: Only register tools that have a decorator
+                # Skip functions without any decorator (helper functions like init_database, log_audit)
+                if not (is_protected or is_mcp_tool):
+                    continue
 
-                self.user_tools.append(tool_metadata)
-                self.tool_handlers[name] = obj
+                if is_protected:
+                    # Protected tool - extract metadata and send to SDK Manager
+                    rbac_requirements = getattr(obj, '_rbac_requirements', {
+                        "roles": [],
+                        "groups": [],
+                        "resources": [],
+                        "scopes": [],
+                        "permissions": [],
+                        "require_all": False
+                    })
+
+                    # Extract optional description (use decorator param or docstring)
+                    description = getattr(obj, '_tool_description', None)
+                    if not description and obj.__doc__:
+                        # Use first line of docstring as description
+                        description = obj.__doc__.strip().split('\n')[0]
+
+                    # Extract optional inputSchema
+                    inputSchema = getattr(obj, '_tool_inputSchema', None)
+
+                    # Store tool with its RBAC metadata, description, and inputSchema
+                    tool_metadata = {
+                        "name": name,
+                        "rbac": rbac_requirements
+                    }
+
+                    # Add description if provided
+                    if description:
+                        tool_metadata["description"] = description
+
+                    # Add inputSchema if provided
+                    if inputSchema:
+                        tool_metadata["inputSchema"] = inputSchema
+
+                    self.user_tools.append(tool_metadata)
+                    self.tool_handlers[name] = obj
+                else:
+                    # Unprotected tool - register as standard MCP tool (no SDK Manager involvement)
+                    self.tool_handlers[name] = obj
+
+                    # Extract metadata from @mcp_tool decorator if present
+                    tool_name = getattr(obj, '_mcp_tool_name', None) or name
+                    description = getattr(obj, '_mcp_tool_description', None)
+                    if not description and obj.__doc__:
+                        description = obj.__doc__.strip().split('\n')[0]
+                    if not description:
+                        description = f"Tool: {tool_name}"
+
+                    inputSchema = getattr(obj, '_mcp_tool_inputSchema', None)
+                    if not inputSchema:
+                        # Create a minimal default inputSchema
+                        inputSchema = {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+
+                    tool_schema = {
+                        "name": tool_name,
+                        "description": description,
+                        "inputSchema": inputSchema
+                    }
+
+                    self.unprotected_tools.append(tool_schema)
+                    logger.info(f"Registered unprotected tool: {tool_name} (standard MCP tool, no auth required)")
 
     def _setup_routes(self):
         """Setup MCP protocol routes"""
@@ -433,16 +545,20 @@ class MCPServer:
             }
 
         elif method == "tools/list":
-            # Delegate to hosted service with RBAC metadata
+            # Get protected tools from SDK Manager (with OAuth and RBAC)
             tools_response = await _make_auth_request(
                 "tools/list",
                 {
                     "client_id": self.client_id,
                     "app_name": self.app_name,
-                    "user_tools": self.user_tools  # Now includes RBAC metadata
+                    "user_tools": self.user_tools  # Protected tools with RBAC metadata
                 }
             )
-            return {"jsonrpc": "2.0", "id": message_id, "result": {"tools": tools_response.get("tools", [])}}
+
+            # Combine protected tools (from SDK Manager) with unprotected tools (local)
+            all_tools = tools_response.get("tools", []) + self.unprotected_tools
+
+            return {"jsonrpc": "2.0", "id": message_id, "result": {"tools": all_tools}}
 
         elif method == "tools/call":
             tool_name = params.get("name")
