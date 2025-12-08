@@ -536,6 +536,358 @@ A: All authentication and tool access is logged. Audit logging features are avai
 
 ---
 
+## SPIRE Workload Identity Integration
+
+AuthSec SDK now includes **SPIRE (SPIFFE Runtime Environment)** integration for service-to-service mTLS authentication. This allows your MCP servers to establish secure, zero-trust communication with backend services using cryptographically-verified workload identities.
+
+### What is SPIRE?
+
+SPIRE provides **workload attestation** and issues short-lived **X.509-SVIDs** (SPIFFE Verifiable Identity Documents) that workloads use for mutual TLS (mTLS) authentication. This eliminates the need for long-lived secrets or API keys when services communicate with each other.
+
+**Key benefits**:
+- ✅ **Zero-trust security**: Every service has a cryptographically-verifiable identity
+- ✅ **No shared secrets**: No API keys or passwords in configuration
+- ✅ **Automatic rotation**: Certificates auto-renew every 30 minutes
+- ✅ **mTLS by default**: All service-to-service traffic is encrypted and authenticated
+- ✅ **Works everywhere**: Kubernetes, Docker, VMs, bare metal
+
+### SPIRE is Optional
+
+SPIRE integration is completely optional. If you don't enable it, your MCP server works exactly as before. SPIRE is only enabled when you provide a `spire_socket_path` parameter.
+
+### How to Enable SPIRE
+
+To enable SPIRE workload identity, simply add the `spire_socket_path` parameter when starting your MCP server:
+
+```python
+from authsec_sdk import run_mcp_server_with_oauth
+
+if __name__ == "__main__":
+    run_mcp_server_with_oauth(
+        client_id="your-client-id-here",
+        app_name="My Secure MCP Server",
+        spire_socket_path="/run/spire/sockets/agent.sock"  # Enable SPIRE
+    )
+```
+
+**Prerequisites**:
+- SPIRE agent must be running on the same host as your MCP server
+- Your workload must be registered in the SPIRE server
+- The socket path must match your SPIRE agent configuration
+
+### Using SPIRE in Your Tools
+
+Once SPIRE is enabled, you can use workload identities in your protected tools:
+
+#### Example 1: Optional SPIRE Usage (Graceful Degradation)
+
+```python
+from authsec_sdk import protected_by_AuthSec, QuickStartSVID
+import httpx
+
+@protected_by_AuthSec("call_backend_service", roles=["admin"])
+async def call_backend_service(arguments: dict) -> list:
+    """Call backend service with optional mTLS"""
+
+    # Initialize SPIRE (returns None if not enabled)
+    svid = await QuickStartSVID.initialize()
+
+    if svid:
+        # SPIRE enabled: Use mTLS
+        ssl_context = svid.create_ssl_context_for_client()
+        async with httpx.AsyncClient(verify=ssl_context) as client:
+            response = await client.get("https://backend.authsec.svc:8443/api/data")
+    else:
+        # SPIRE disabled: Fall back to regular HTTPS
+        async with httpx.AsyncClient() as client:
+            response = await client.get("https://backend.company.com/api/data")
+
+    data = response.json()
+    return [{"type": "text", "text": f"Response: {data}"}]
+```
+
+#### Example 2: Required SPIRE Usage
+
+```python
+from authsec_sdk import protected_by_AuthSec, QuickStartSVID
+import httpx
+
+@protected_by_AuthSec("secure_payment", roles=["admin"])
+async def secure_payment(arguments: dict) -> list:
+    """Process payment - requires SPIRE mTLS"""
+
+    # Raise error if SPIRE is not enabled
+    svid = await QuickStartSVID.initialize(raise_on_disabled=True)
+
+    # Use SPIRE identity for mTLS
+    ssl_context = svid.create_ssl_context_for_client()
+
+    async with httpx.AsyncClient(verify=ssl_context) as client:
+        response = await client.post(
+            "https://payment-service.authsec.svc:8443/process",
+            json={
+                "user": arguments['_user_info']['email'],
+                "amount": arguments.get('amount', 100.00)
+            }
+        )
+        data = response.json()
+
+    return [{"type": "text", "text": f"Payment processed: {data}"}]
+```
+
+#### Example 3: Combined MCP Auth + SPIRE + Vault
+
+```python
+from authsec_sdk import protected_by_AuthSec, QuickStartSVID, ServiceAccessSDK
+import aiohttp
+import httpx
+
+@protected_by_AuthSec("github_with_audit", scopes=["read"])
+async def github_with_audit(arguments: dict, session) -> list:
+    """
+    Combines three security layers:
+    1. MCP authentication (user must have 'read' scope)
+    2. External service credentials (GitHub from Vault)
+    3. SPIRE mTLS (for calling internal audit service)
+    """
+    user_info = arguments['_user_info']
+
+    # Get GitHub credentials from Vault
+    services_sdk = ServiceAccessSDK(session)
+    github_token = await services_sdk.get_service_token("GitHub API Integration")
+
+    # Call GitHub API with OAuth token
+    async with aiohttp.ClientSession() as http_session:
+        async with http_session.get(
+            'https://api.github.com/user/repos',
+            headers={'Authorization': f'Bearer {github_token}'}
+        ) as response:
+            repos = await response.json()
+
+    # Log to internal audit service with SPIRE mTLS (optional)
+    svid = await QuickStartSVID.initialize()
+    if svid:
+        ssl_context = svid.create_ssl_context_for_client()
+        async with httpx.AsyncClient(verify=ssl_context) as client:
+            await client.post(
+                "https://audit-service.authsec.svc:8443/log",
+                json={
+                    "user": user_info['email'],
+                    "action": "github_repos_accessed",
+                    "repo_count": len(repos)
+                }
+            )
+
+    repo_list = "\n".join([f"- {repo['full_name']}" for repo in repos[:10]])
+    return [{"type": "text", "text": f"GitHub Repositories:\n{repo_list}"}]
+```
+
+### SPIRE Certificate Details
+
+When SPIRE is initialized, it automatically:
+
+1. **Fetches SVID** from local SPIRE agent via SDK Manager
+2. **Writes certificates** to disk (`/tmp/spiffe-certs/` by default)
+3. **Creates SSL contexts** for mTLS client and server connections
+4. **Auto-renews** certificates every 30 minutes
+
+You can access certificate information:
+
+```python
+svid = await QuickStartSVID.initialize()
+
+# SPIFFE ID (workload identity)
+print(svid.spiffe_id)  # e.g., "spiffe://example.org/my-service"
+
+# Certificate paths
+print(svid.cert_file_path)  # /tmp/spiffe-certs/svid.crt
+print(svid.key_file_path)   # /tmp/spiffe-certs/svid.key
+print(svid.ca_file_path)    # /tmp/spiffe-certs/ca.crt
+
+# Raw PEM strings
+print(svid.certificate)     # X.509 certificate PEM
+print(svid.private_key)     # Private key PEM
+print(svid.trust_bundle)    # CA bundle PEM
+```
+
+### SPIRE for Server-Side mTLS
+
+If you're building a service that accepts mTLS connections, use the server SSL context:
+
+```python
+from authsec_sdk import QuickStartSVID
+import uvicorn
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/secure-endpoint")
+async def secure_endpoint():
+    return {"message": "mTLS connection verified"}
+
+if __name__ == "__main__":
+    # Initialize SPIRE
+    import asyncio
+    svid = asyncio.run(QuickStartSVID.initialize(raise_on_disabled=True))
+
+    # Create server SSL context
+    ssl_context = svid.create_ssl_context_for_server()
+
+    # Run server with mTLS
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8443,
+        ssl_keyfile=str(svid.key_file_path),
+        ssl_certfile=str(svid.cert_file_path),
+        ssl_ca_certs=str(svid.ca_file_path),
+        ssl_cert_reqs=2  # Require client certificates
+    )
+```
+
+### SPIRE Configuration Options
+
+You can customize SPIRE behavior with additional parameters:
+
+```python
+run_mcp_server_with_oauth(
+    client_id="your-client-id",
+    app_name="My Server",
+    spire_socket_path="/run/spire/sockets/agent.sock",  # Required to enable SPIRE
+)
+```
+
+### Troubleshooting SPIRE
+
+**Q: My tool crashes when SPIRE is not enabled**
+```python
+# ❌ Bad: Will crash if SPIRE is disabled
+svid = await QuickStartSVID.initialize(raise_on_disabled=True)
+
+# ✅ Good: Returns None if SPIRE is disabled
+svid = await QuickStartSVID.initialize()
+if svid:
+    # Use SPIRE
+    pass
+else:
+    # Fall back to alternative approach
+    pass
+```
+
+**Q: How do I check if SPIRE is enabled?**
+```python
+from authsec_sdk import QuickStartSVID
+
+svid = await QuickStartSVID.initialize()
+if svid:
+    print(f"SPIRE enabled. Identity: {svid.spiffe_id}")
+else:
+    print("SPIRE disabled")
+```
+
+**Q: Agent connection failed**
+- Verify SPIRE agent is running: `systemctl status spire-agent`
+- Check socket path matches agent config: `/run/spire/sockets/agent.sock`
+- Ensure workload is registered in SPIRE server
+- Check environment variables (K8s pod labels, Docker labels)
+
+**Q: Certificates not renewing**
+- Check logs for renewal errors
+- Verify agent connection is stable
+- Ensure workload registration hasn't expired
+
+### SPIRE Architecture
+
+```
+┌─────────────────────────────────────┐
+│   Your MCP Server (server.py)      │
+│      with AuthSec SDK               │
+│                                     │
+│   @protected_by_AuthSec             │
+│   async def my_tool():              │
+│       svid = await QuickStartSVID   │
+│         .initialize()               │
+│       ssl_ctx = svid.create_ssl()   │
+└──────────┬──────────────────────────┘
+           │ HTTPS
+           ▼
+┌─────────────────────────────────────┐
+│   AuthSec SDK Manager Service       │
+│                                     │
+│   ├── Maps client_id to tenant_id  │
+│   ├── Validates tenant access       │
+│   └── Proxies to SPIRE agent        │
+└──────────┬──────────────────────────┘
+           │ gRPC (unix socket)
+           ▼
+┌─────────────────────────────────────┐
+│   SPIRE Agent (local)               │
+│                                     │
+│   ├── Attests workload identity     │
+│   ├── Issues X.509-SVID             │
+│   └── Manages certificate rotation  │
+└──────────┬──────────────────────────┘
+           │ gRPC
+           ▼
+┌─────────────────────────────────────┐
+│   SPIRE Server (central)            │
+│                                     │
+│   ├── Certificate Authority         │
+│   ├── Workload registry             │
+│   └── Trust domain management       │
+└─────────────────────────────────────┘
+```
+
+**Key points**:
+- Your SDK code makes REST calls to SDK Manager (not direct gRPC)
+- SDK Manager handles client_id → tenant_id mapping (same as MCP auth)
+- SDK Manager proxies SVID fetch to local SPIRE agent
+- Certificates are written to disk and auto-renewed every 30 minutes
+- All complexity is hidden from your application code
+
+### SPIRE + MCP Auth: Complete Zero-Trust Architecture
+
+Combining MCP authentication with SPIRE workload identity gives you end-to-end zero-trust security:
+
+1. **User-to-Service**: MCP OAuth ensures only authenticated users can access tools
+2. **RBAC Authorization**: Database-backed role checking controls what users can do
+3. **Service-to-Service**: SPIRE mTLS ensures only verified services can communicate
+4. **External Services**: Vault integration keeps credentials secure
+
+```python
+@protected_by_AuthSec("zero_trust_operation", roles=["admin"])
+async def zero_trust_operation(arguments: dict, session) -> list:
+    # Layer 1: User authenticated via MCP OAuth ✓
+    # Layer 2: User has admin role (RBAC) ✓
+    user_email = arguments['_user_info']['email']
+
+    # Layer 3: External service credentials from Vault ✓
+    services_sdk = ServiceAccessSDK(session)
+    api_key = await services_sdk.get_service_token("Payment API")
+
+    # Layer 4: Service-to-service mTLS via SPIRE ✓
+    svid = await QuickStartSVID.initialize()
+    ssl_context = svid.create_ssl_context_for_client()
+
+    # Now make secure service call
+    async with httpx.AsyncClient(verify=ssl_context) as client:
+        response = await client.post(
+            "https://payment.authsec.svc:8443/charge",
+            headers={"X-API-Key": api_key},
+            json={"user": user_email, "amount": 100.00}
+        )
+
+    return [{"type": "text", "text": "Zero-trust operation completed"}]
+```
+
+**All four security layers working together**:
+- ✅ **AuthN**: User authenticated via OAuth
+- ✅ **AuthZ**: User authorized via RBAC
+- ✅ **Secrets**: API keys from Vault
+- ✅ **mTLS**: Service identity via SPIRE
+
+---
+
 ## Get Started Today
 
 Secure your MCP server in just 5 minutes:

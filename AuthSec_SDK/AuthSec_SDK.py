@@ -590,9 +590,36 @@ class MCPServer:
                 "error": {"code": -32601, "message": f"Method not found: {method}"}
             }
 
-def run_mcp_server_with_oauth(user_module, client_id: str, app_name: str, host: str = "0.0.0.0", port: int = 3005):
-    """Run MCP server using SDK Manager for auth"""
+def run_mcp_server_with_oauth(
+    user_module,
+    client_id: str,
+    app_name: str,
+    host: str = "0.0.0.0",
+    port: int = 3005,
+    spire_socket_path: Optional[str] = None
+):
+    """
+    Run MCP server using SDK Manager for auth
+
+    Args:
+        user_module: Module containing MCP tools
+        client_id: Your client ID
+        app_name: Application name
+        host: Server host (default: 0.0.0.0)
+        port: Server port (default: 3005)
+        spire_socket_path: Optional path to SPIRE agent socket.
+                          If provided, SPIRE workload identity will be enabled.
+                          If None, SPIRE is disabled (default: None)
+    """
     configure_auth((client_id+"-main-client"), app_name)
+
+    # Store SPIRE socket path in global config if provided
+    if spire_socket_path:
+        _config["spire_socket_path"] = spire_socket_path
+        _config["spire_enabled"] = True
+    else:
+        _config["spire_enabled"] = False
+
     async def _run():
         server = MCPServer((client_id+"-main-client"), app_name)
         server.set_user_module(user_module)
@@ -600,6 +627,13 @@ def run_mcp_server_with_oauth(user_module, client_id: str, app_name: str, host: 
         print(f"Starting {app_name} MCP Server on {host}:{port}")
         print(f"Authentication via: {_config['auth_service_url']}")
         print(f"Services via: {_config['services_base_url']}")
+
+        if _config.get("spire_enabled"):
+            print(f"SPIRE Workload Identity: ENABLED")
+            print(f"  Agent socket: {_config['spire_socket_path']}")
+        else:
+            print(f"SPIRE Workload Identity: DISABLED")
+
         print(f"MCP Inspector: npx @modelcontextprotocol/inspector http://{host}:{port}")
 
         config = uvicorn.Config(server.app, host=host, port=port, log_level="info")
