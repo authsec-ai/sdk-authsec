@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="AuthSec_SDK",
-    version="3.3.0",
+    version="3.5.0",
     description="AuthSec SDK for MCP_AUTH, SERVICES, and SPIRE integration",
     author="AuthSec Team",
     email="a@authnull.com",
