@@ -16,7 +16,7 @@ from .spire_sdk import (
     WorkloadSVID
 )
 
-__version__ = "3.0.0"
+__version__ = "3.3.0"
 __all__ = [
     # MCP Auth & Services
     "protected_by_AuthSec",
