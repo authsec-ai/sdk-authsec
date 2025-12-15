@@ -5,19 +5,14 @@ Provides easy SPIFFE SVID integration using direct gRPC to SPIRE agent
 
 import os
 import ssl
-import sys
 import asyncio
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
-# Add parent directory to import spire_sdk
-_parent_dir = Path(__file__).parent.parent.parent
-if str(_parent_dir) not in sys.path:
-    sys.path.insert(0, str(_parent_dir))
-
-from spire_sdk.spiffe_workload_api.client import WorkloadAPIClient
+# Import from local spiffe_workload_api package
+from .spiffe_workload_api.client import WorkloadAPIClient
 
 logger = logging.getLogger(__name__)
 
