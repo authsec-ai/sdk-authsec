@@ -193,27 +193,63 @@ class QuickStartSVID:
         self.svid: Optional[WorkloadSVID] = None
         self.renewal_task: Optional[asyncio.Task] = None
         self.running = False
+        self._stored_config: Optional[Dict[str, Any]] = None
+        self._grpc_client = None  # Only used in direct gRPC mode
 
     @classmethod
     async def initialize(
         cls,
         socket_path: Optional[str] = None,
-        raise_on_disabled: bool = False
+        raise_on_disabled: bool = False,
+        client_id: Optional[str] = None,
+        sdk_manager_url: Optional[str] = None,
+        cert_dir: Optional[str] = None
     ) -> Optional['QuickStartSVID']:
         """
         Initialize SPIRE workload identity (singleton pattern)
 
+        This method supports two usage patterns:
+
+        **Pattern 1: MCP Server Integration (uses global config)**
+        ```python
+        from authsec_sdk import run_mcp_server_with_oauth, QuickStartSVID
+
+        run_mcp_server_with_oauth(
+            client_id="your-client-id",
+            app_name="My Server",
+            spire_socket_path="/run/spire/sockets/agent.sock"
+        )
+
+        # In tools:
+        svid = await QuickStartSVID.initialize()
+        ```
+
+        **Pattern 2: Standalone SPIRE (direct parameters)**
+        ```python
+        from authsec_sdk import QuickStartSVID
+
+        svid = await QuickStartSVID.initialize(
+            client_id="your-client-id",
+            socket_path="/run/spire/sockets/agent.sock"
+        )
+        ```
+
         This method:
-        1. Gets client_id from global auth config
+        1. Gets client_id from parameters or global auth config
         2. Collects environment metadata (K8s/Docker labels)
         3. Calls SDK Manager to fetch SVID from local agent
         4. Writes certificates to disk
         5. Starts automatic renewal
 
         Args:
-            socket_path: Override default socket path
+            socket_path: Path to SPIRE agent socket (default: /run/spire/sockets/agent.sock)
             raise_on_disabled: If True, raises RuntimeError when SPIRE is disabled.
                              If False (default), returns None when SPIRE is disabled.
+            client_id: Client ID for SDK Manager authentication (standalone mode).
+                      If provided, uses standalone mode. If not, uses global auth config.
+            sdk_manager_url: SDK Manager base URL (standalone mode only).
+                           Default: https://dev.api.authsec.dev/sdkmgr/spire
+            cert_dir: Directory to store certificates (default: /tmp/spiffe-certs)
 
         Returns:
             QuickStartSVID instance with SVID ready for mTLS, or None if SPIRE is disabled
@@ -224,7 +260,13 @@ class QuickStartSVID:
         async with cls._lock:
             if cls._instance is None:
                 cls._instance = cls()
-                result = await cls._instance._fetch(socket_path, raise_on_disabled)
+                result = await cls._instance._fetch(
+                    socket_path=socket_path,
+                    raise_on_disabled=raise_on_disabled,
+                    client_id=client_id,
+                    sdk_manager_url=sdk_manager_url,
+                    cert_dir=cert_dir
+                )
                 if result is False:
                     # SPIRE is disabled and raise_on_disabled=False
                     cls._instance = None
@@ -234,33 +276,85 @@ class QuickStartSVID:
     async def _fetch(
         self,
         socket_path: Optional[str] = None,
-        raise_on_disabled: bool = False
+        raise_on_disabled: bool = False,
+        client_id: Optional[str] = None,
+        sdk_manager_url: Optional[str] = None,
+        cert_dir: Optional[str] = None
     ) -> bool:
         """
-        Fetch SVID from SDK Manager
+        Fetch SVID from either SDK Manager or direct gRPC
+
+        Supports three modes:
+        1. MCP Server mode: Uses global auth config (no client_id, global config exists)
+        2. SDK Manager mode: Uses REST API with client_id (client_id provided)
+        3. Direct gRPC mode: Connects directly to agent (no client_id, no global config)
 
         Returns:
             True if successful, False if SPIRE is disabled (and raise_on_disabled=False)
         """
-        logger.info("Fetching SPIFFE SVID via SDK Manager...")
+        # Determine mode
+        use_sdk_manager = False
+        config = None
 
-        # Get config from global auth settings
-        try:
-            config = _get_spire_config()
-        except RuntimeError as e:
-            # SPIRE is not enabled
-            error_msg = str(e)
-            if "not enabled" in error_msg.lower():
-                if raise_on_disabled:
-                    raise
+        if client_id:
+            # SDK Manager mode with explicit client_id
+            use_sdk_manager = True
+            config = {
+                "client_id": client_id,
+                "sdk_manager_url": sdk_manager_url or "https://dev.api.authsec.dev/sdkmgr/spire",
+                "socket_path": socket_path or "/run/spire/sockets/agent.sock",
+                "cert_dir": cert_dir or "/tmp/spiffe-certs",
+                "timeout": 10,
+                "mode": "sdk_manager"
+            }
+            logger.info("Using SDK Manager mode (client_id provided)")
+        else:
+            # Try to get global config (MCP Server mode)
+            try:
+                config = _get_spire_config()
+                config["mode"] = "mcp_server"
+                use_sdk_manager = True
+                logger.info("Using MCP Server mode (global config)")
+
+                # Override socket_path if provided
+                if socket_path:
+                    config["socket_path"] = socket_path
+                if cert_dir:
+                    config["cert_dir"] = cert_dir
+
+            except RuntimeError as e:
+                # No global config - check if it's because SPIRE is disabled or not configured
+                error_msg = str(e)
+                if "not enabled" in error_msg.lower():
+                    if raise_on_disabled:
+                        raise
+                    else:
+                        logger.warning("SPIRE is not enabled. Skipping SVID fetch.")
+                        return False
+                elif "not configured" in error_msg.lower():
+                    # No global config - use direct gRPC mode
+                    use_sdk_manager = False
+                    config = {
+                        "socket_path": socket_path or "/run/spire/sockets/agent.sock",
+                        "cert_dir": cert_dir or "/tmp/spiffe-certs",
+                        "mode": "direct_grpc"
+                    }
+                    logger.info("Using direct gRPC mode (no auth config)")
                 else:
-                    logger.warning("SPIRE is not enabled. Skipping SVID fetch.")
-                    return False
-            else:
-                # Other RuntimeError, re-raise
-                raise
+                    # Other error
+                    raise
 
-        socket_path = socket_path or config["socket_path"]
+        # Fetch SVID based on mode
+        if use_sdk_manager:
+            # Use SDK Manager REST API
+            return await self._fetch_via_sdk_manager(config)
+        else:
+            # Use direct gRPC connection to agent
+            return await self._fetch_via_grpc(config)
+
+    async def _fetch_via_sdk_manager(self, config: Dict[str, Any]) -> bool:
+        """Fetch SVID via SDK Manager REST API"""
+        logger.info("Fetching SPIFFE SVID via SDK Manager...")
 
         # Collect environment metadata for attestation
         environment_metadata = self._collect_environment_metadata()
@@ -274,7 +368,7 @@ class QuickStartSVID:
                     f"{config['sdk_manager_url']}/workload/initialize",
                     json={
                         "client_id": config["client_id"],
-                        "socket_path": socket_path,
+                        "socket_path": config["socket_path"],
                         "environment_metadata": environment_metadata
                     },
                     headers={"Content-Type": "application/json"}
@@ -293,6 +387,60 @@ class QuickStartSVID:
                 trust_bundle=data["trust_bundle"],
                 cert_dir=Path(config["cert_dir"])
             )
+
+            # Store config for renewal
+            self._stored_config = config
+
+            logger.info(f"✓ SVID initialized: {self.svid.spiffe_id}")
+            logger.info("✓ Certificates ready for mTLS")
+
+            # Start automatic renewal (every 30 minutes)
+            self.running = True
+            self.renewal_task = asyncio.create_task(self._auto_renewal_loop())
+
+            return True
+
+        except Exception as e:
+            logger.error(f"SVID initialization failed: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize SVID: {str(e)}")
+
+    async def _fetch_via_grpc(self, config: Dict[str, Any]) -> bool:
+        """Fetch SVID via direct gRPC connection to SPIRE agent"""
+        logger.info("Fetching SPIFFE SVID via direct gRPC...")
+
+        try:
+            # Import the gRPC client (from tests/spire_sdk)
+            import sys
+            from pathlib import Path as PathLib
+
+            # Add parent directory to path to import spire_sdk
+            parent_dir = PathLib(__file__).parent.parent.parent
+            if str(parent_dir) not in sys.path:
+                sys.path.insert(0, str(parent_dir))
+
+            from spire_sdk.spiffe_workload_api.client import WorkloadAPIClient
+
+            # Create gRPC client
+            grpc_client = WorkloadAPIClient(socket_path=config["socket_path"])
+            await grpc_client.connect()
+
+            # Fetch SVID once
+            success = await grpc_client.fetch_x509_svid_once()
+            if not success:
+                raise RuntimeError("Failed to fetch SVID from agent")
+
+            # Create WorkloadSVID object
+            self.svid = WorkloadSVID(
+                spiffe_id=grpc_client.spiffe_id,
+                certificate=grpc_client.certificate,
+                private_key=grpc_client.private_key,
+                trust_bundle=grpc_client.trust_bundle,
+                cert_dir=Path(config["cert_dir"])
+            )
+
+            # Store config and gRPC client for renewal
+            self._stored_config = config
+            self._grpc_client = grpc_client
 
             logger.info(f"✓ SVID initialized: {self.svid.spiffe_id}")
             logger.info("✓ Certificates ready for mTLS")
@@ -377,8 +525,26 @@ class QuickStartSVID:
                 # Continue trying
 
     async def _renew_svid(self):
-        """Renew SVID from SDK Manager"""
-        config = _get_spire_config()
+        """Renew SVID (supports both SDK Manager and direct gRPC modes)"""
+        # Use stored config from initialization
+        if not self._stored_config:
+            raise RuntimeError("SVID config not stored")
+
+        config = self._stored_config
+        mode = config.get("mode", "sdk_manager")
+
+        if mode == "direct_grpc":
+            # Direct gRPC mode: Fetch from agent
+            await self._renew_via_grpc()
+        else:
+            # SDK Manager mode: Call REST API
+            await self._renew_via_sdk_manager()
+
+        logger.info("✅ SVID renewed successfully")
+
+    async def _renew_via_sdk_manager(self):
+        """Renew SVID via SDK Manager REST API"""
+        config = self._stored_config
         environment_metadata = self._collect_environment_metadata()
 
         timeout = aiohttp.ClientTimeout(total=config["timeout"])
@@ -406,7 +572,22 @@ class QuickStartSVID:
             trust_bundle=data["trust_bundle"]
         )
 
-        logger.info("✅ SVID renewed successfully")
+    async def _renew_via_grpc(self):
+        """Renew SVID via direct gRPC connection"""
+        if not self._grpc_client:
+            raise RuntimeError("gRPC client not available")
+
+        # Fetch fresh SVID
+        success = await self._grpc_client.fetch_x509_svid_once()
+        if not success:
+            raise RuntimeError("Failed to renew SVID from agent")
+
+        # Refresh SVID data
+        self.svid.refresh(
+            certificate=self._grpc_client.certificate,
+            private_key=self._grpc_client.private_key,
+            trust_bundle=self._grpc_client.trust_bundle
+        )
 
     @classmethod
     async def get(cls) -> 'QuickStartSVID':
@@ -485,7 +666,7 @@ class QuickStartSVID:
         return self.svid.create_ssl_context_for_client()
 
     async def shutdown(self):
-        """Shutdown SVID renewal"""
+        """Shutdown SVID renewal and gRPC client"""
         self.running = False
         if self.renewal_task:
             self.renewal_task.cancel()
@@ -493,4 +674,10 @@ class QuickStartSVID:
                 await self.renewal_task
             except asyncio.CancelledError:
                 pass
+
+        # Disconnect gRPC client if in direct mode
+        if self._grpc_client:
+            await self._grpc_client.disconnect()
+            self._grpc_client = None
+
         logger.info("SVID renewal stopped")
