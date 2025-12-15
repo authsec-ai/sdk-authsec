@@ -557,107 +557,87 @@ SPIRE integration is completely optional. If you don't enable it, your MCP serve
 
 ### How to Enable SPIRE
 
-AuthSec SDK supports **three SPIRE usage modes**:
+AuthSec SDK now includes a **standalone SPIFFE Workload API client** that connects directly to the SPIRE agent via gRPC. This is the recommended approach for most use cases.
 
-#### Mode 1: MCP Server Integration (Recommended for Multi-Tenant)
+#### Standalone Mode (Recommended)
 
-Enable SPIRE by adding `spire_socket_path` parameter when starting your MCP server. SPIRE calls are routed through SDK Manager for multi-tenant isolation.
-
-```python
-from authsec_sdk import run_mcp_server_with_oauth
-
-if __name__ == "__main__":
-    run_mcp_server_with_oauth(
-        client_id="your-client-id-here",
-        app_name="My Secure MCP Server",
-        spire_socket_path="/run/spire/sockets/agent.sock"  # Enable SPIRE
-    )
-```
-
-#### Mode 2: Standalone with SDK Manager (Multi-Tenant)
-
-Use SPIRE outside of MCP server context, but still route through SDK Manager for tenant isolation:
+Connect directly to SPIRE agent via gRPC. Simple, fast, and requires no external services:
 
 ```python
 from authsec_sdk import QuickStartSVID
 
-# Initialize with client_id (routes through SDK Manager)
-svid = await QuickStartSVID.initialize(
-    client_id="your-client-id",
-    socket_path="/run/spire/sockets/agent.sock"
-)
-
-# Use for mTLS
-ssl_context = svid.create_ssl_context_for_client()
-```
-
-#### Mode 3: Direct gRPC Mode (Single Workload)
-
-Connect directly to SPIRE agent via gRPC without SDK Manager. Best for standalone workloads that don't need multi-tenant isolation:
-
-```python
-from authsec_sdk import QuickStartSVID
-
-# Initialize without client_id (direct gRPC to agent)
+# Initialize - connects directly to SPIRE agent via gRPC
 svid = await QuickStartSVID.initialize(
     socket_path="/run/spire/sockets/agent.sock"
 )
 
-# Use for mTLS
+# Access SPIFFE identity
+print(f"SPIFFE ID: {svid.spiffe_id}")
+
+# Use for mTLS communication
 ssl_context = svid.create_ssl_context_for_client()
+
+# Certificates are automatically written to disk and kept up-to-date
+print(f"Certificate: {svid.cert_file_path}")  # /tmp/spiffe-certs/svid.crt
+print(f"Private Key: {svid.key_file_path}")   # /tmp/spiffe-certs/svid.key
+print(f"CA Bundle: {svid.ca_file_path}")      # /tmp/spiffe-certs/ca.crt
 ```
+
+**Key Features**:
+- ✅ **Direct gRPC connection** to SPIRE agent (no external services required)
+- ✅ **Automatic certificate renewal** via streaming gRPC connection
+- ✅ **Singleton pattern** - one SVID per application lifecycle
+- ✅ **Automatic file management** - certificates written to disk and kept fresh
 
 **Prerequisites**:
 - SPIRE agent must be running on the same host as your workload
 - Your workload must be registered in the SPIRE server
-- The socket path must match your SPIRE agent configuration
+- The socket path must match your SPIRE agent configuration (default: `/run/spire/sockets/agent.sock`)
 
 ### Using SPIRE in Your Tools
 
 Once SPIRE is enabled, you can use workload identities in your protected tools:
 
-#### Example 1: Optional SPIRE Usage (Graceful Degradation)
+#### Example 1: Basic SPIRE Usage for mTLS
 
 ```python
-from authsec_sdk import protected_by_AuthSec, QuickStartSVID
+from authsec_sdk import QuickStartSVID
 import httpx
 
-@protected_by_AuthSec("call_backend_service", roles=["admin"])
-async def call_backend_service(arguments: dict) -> list:
-    """Call backend service with optional mTLS"""
+async def call_backend_service():
+    """Call backend service with mTLS"""
 
-    # Initialize SPIRE (returns None if not enabled)
-    svid = await QuickStartSVID.initialize()
-
-    if svid:
-        # SPIRE enabled: Use mTLS
-        ssl_context = svid.create_ssl_context_for_client()
-        async with httpx.AsyncClient(verify=ssl_context) as client:
-            response = await client.get("https://backend.authsec.svc:8443/api/data")
-    else:
-        # SPIRE disabled: Fall back to regular HTTPS
-        async with httpx.AsyncClient() as client:
-            response = await client.get("https://backend.company.com/api/data")
-
-    data = response.json()
-    return [{"type": "text", "text": f"Response: {data}"}]
-```
-
-#### Example 2: Required SPIRE Usage
-
-```python
-from authsec_sdk import protected_by_AuthSec, QuickStartSVID
-import httpx
-
-@protected_by_AuthSec("secure_payment", roles=["admin"])
-async def secure_payment(arguments: dict) -> list:
-    """Process payment - requires SPIRE mTLS"""
-
-    # Raise error if SPIRE is not enabled
-    svid = await QuickStartSVID.initialize(raise_on_disabled=True)
+    # Initialize SPIRE - connects directly to agent
+    svid = await QuickStartSVID.initialize(
+        socket_path="/run/spire/sockets/agent.sock"
+    )
 
     # Use SPIRE identity for mTLS
     ssl_context = svid.create_ssl_context_for_client()
+
+    async with httpx.AsyncClient(verify=ssl_context) as client:
+        response = await client.get("https://backend.authsec.svc:8443/api/data")
+
+    return response.json()
+```
+
+#### Example 2: Using SPIRE with FastAPI Server
+
+```python
+from authsec_sdk import QuickStartSVID
+from fastapi import FastAPI
+import uvicorn
+
+app = FastAPI()
+
+async def main():
+    # Initialize SPIRE
+    svid = await QuickStartSVID.initialize(
+        socket_path="/run/spire/sockets/agent.sock"
+    )
+
+    # Start server with mTLS
+    ssl_context = svid.create_ssl_context_for_server()
 
     async with httpx.AsyncClient(verify=ssl_context) as client:
         response = await client.post(
@@ -765,7 +745,9 @@ async def secure_endpoint():
 if __name__ == "__main__":
     # Initialize SPIRE
     import asyncio
-    svid = asyncio.run(QuickStartSVID.initialize(raise_on_disabled=True))
+    svid = asyncio.run(QuickStartSVID.initialize(
+        socket_path="/run/spire/sockets/agent.sock"
+    ))
 
     # Create server SSL context
     ssl_context = svid.create_ssl_context_for_server()
@@ -784,45 +766,20 @@ if __name__ == "__main__":
 
 ### SPIRE Configuration Options
 
-You can customize SPIRE behavior with additional parameters:
+You can customize the socket path and certificate directory:
 
 ```python
-run_mcp_server_with_oauth(
-    client_id="your-client-id",
-    app_name="My Server",
-    spire_socket_path="/run/spire/sockets/agent.sock",  # Required to enable SPIRE
+from authsec_sdk import QuickStartSVID
+
+svid = await QuickStartSVID.initialize(
+    socket_path="/run/spire/sockets/agent.sock",  # Default socket path
+    cert_dir="/tmp/spiffe-certs"                   # Default certificate directory
 )
 ```
 
 ### Troubleshooting SPIRE
 
-**Q: My tool crashes when SPIRE is not enabled**
-```python
-# ❌ Bad: Will crash if SPIRE is disabled
-svid = await QuickStartSVID.initialize(raise_on_disabled=True)
-
-# ✅ Good: Returns None if SPIRE is disabled
-svid = await QuickStartSVID.initialize()
-if svid:
-    # Use SPIRE
-    pass
-else:
-    # Fall back to alternative approach
-    pass
-```
-
-**Q: How do I check if SPIRE is enabled?**
-```python
-from authsec_sdk import QuickStartSVID
-
-svid = await QuickStartSVID.initialize()
-if svid:
-    print(f"SPIRE enabled. Identity: {svid.spiffe_id}")
-else:
-    print("SPIRE disabled")
-```
-
-**Q: Agent connection failed**
+**Q: Connection to SPIRE agent fails**
 - Verify SPIRE agent is running: `systemctl status spire-agent`
 - Check socket path matches agent config: `/run/spire/sockets/agent.sock`
 - Ensure workload is registered in SPIRE server
