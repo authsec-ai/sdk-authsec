@@ -2,8 +2,8 @@ from setuptools import setup, find_packages
 
 setup(
     name="AuthSec_SDK",
-    version="3.1.0",
-    description="AuthSec SDK for MCP_AUTH and SERVICES integration with RBAC support",
+    version="3.3.0",
+    description="AuthSec SDK for MCP_AUTH, SERVICES, and SPIRE integration",
     author="AuthSec Team",
     email="a@authnull.com",
     packages=find_packages(),

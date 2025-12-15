@@ -557,7 +557,11 @@ SPIRE integration is completely optional. If you don't enable it, your MCP serve
 
 ### How to Enable SPIRE
 
-To enable SPIRE workload identity, simply add the `spire_socket_path` parameter when starting your MCP server:
+AuthSec SDK supports **three SPIRE usage modes**:
+
+#### Mode 1: MCP Server Integration (Recommended for Multi-Tenant)
+
+Enable SPIRE by adding `spire_socket_path` parameter when starting your MCP server. SPIRE calls are routed through SDK Manager for multi-tenant isolation.
 
 ```python
 from authsec_sdk import run_mcp_server_with_oauth
@@ -570,8 +574,41 @@ if __name__ == "__main__":
     )
 ```
 
+#### Mode 2: Standalone with SDK Manager (Multi-Tenant)
+
+Use SPIRE outside of MCP server context, but still route through SDK Manager for tenant isolation:
+
+```python
+from authsec_sdk import QuickStartSVID
+
+# Initialize with client_id (routes through SDK Manager)
+svid = await QuickStartSVID.initialize(
+    client_id="your-client-id",
+    socket_path="/run/spire/sockets/agent.sock"
+)
+
+# Use for mTLS
+ssl_context = svid.create_ssl_context_for_client()
+```
+
+#### Mode 3: Direct gRPC Mode (Single Workload)
+
+Connect directly to SPIRE agent via gRPC without SDK Manager. Best for standalone workloads that don't need multi-tenant isolation:
+
+```python
+from authsec_sdk import QuickStartSVID
+
+# Initialize without client_id (direct gRPC to agent)
+svid = await QuickStartSVID.initialize(
+    socket_path="/run/spire/sockets/agent.sock"
+)
+
+# Use for mTLS
+ssl_context = svid.create_ssl_context_for_client()
+```
+
 **Prerequisites**:
-- SPIRE agent must be running on the same host as your MCP server
+- SPIRE agent must be running on the same host as your workload
 - Your workload must be registered in the SPIRE server
 - The socket path must match your SPIRE agent configuration
 
