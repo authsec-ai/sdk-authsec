@@ -527,6 +527,48 @@ class MCPServer:
                 "resource_documentation": "https://docs.authsec.dev/mcp-oauth"
             })
 
+        # Redirect to SDK Manager's authorization server metadata
+        @self.app.get("/.well-known/oauth-authorization-server")
+        async def oauth_authorization_server_redirect():
+            """
+            Redirect to SDK Manager's OAuth authorization server metadata
+            Some MCP clients request this directly instead of following authorization_servers
+            """
+            from fastapi.responses import RedirectResponse
+
+            auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
+            metadata_url = f"{auth_server_url}/sdkmgr/mcp-auth/.well-known/oauth-authorization-server"
+
+            return RedirectResponse(url=metadata_url, status_code=307)
+
+        # Some clients request OpenID configuration
+        @self.app.get("/.well-known/openid-configuration")
+        async def openid_configuration_redirect():
+            """
+            Redirect to SDK Manager's OAuth metadata (same as oauth-authorization-server)
+            """
+            from fastapi.responses import RedirectResponse
+
+            auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
+            metadata_url = f"{auth_server_url}/sdkmgr/mcp-auth/.well-known/oauth-authorization-server"
+
+            return RedirectResponse(url=metadata_url, status_code=307)
+
+        # Dynamic Client Registration (RFC 7591) - Not supported
+        @self.app.post("/register")
+        async def dynamic_client_registration():
+            """
+            Dynamic Client Registration endpoint
+            Currently not supported - clients must be pre-registered
+            """
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "invalid_client_metadata",
+                    "error_description": "Dynamic client registration is not supported. Please use a pre-registered client_id."
+                }
+            )
+
         @self.app.get("/")
         async def root():
             return {
