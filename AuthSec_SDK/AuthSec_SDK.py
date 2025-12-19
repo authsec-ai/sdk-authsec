@@ -362,6 +362,10 @@ class MCPServer:
         self.unprotected_tools: List[Dict[str, Any]] = []  # Unprotected tools (standard MCP)
         self.tool_handlers: Dict[str, Callable] = {}  # All tool handlers (both protected and unprotected)
 
+        # OAuth 2.1 connection tracking
+        # Maps client_key (host:port) → connection_info
+        self.connection_map: Dict[str, Dict] = {}
+
         self.app = FastAPI(title=app_name, version="1.0.0")
         self.app.add_middleware(
             CORSMiddleware,
@@ -500,88 +504,262 @@ class MCPServer:
                     logger.info(f"Registered unprotected tool: {tool_name} (standard MCP tool, no auth required)")
 
     def _setup_routes(self):
-        """Setup MCP protocol routes"""
+        """Setup MCP protocol routes with OAuth 2.1 support"""
+
+        # OAuth 2.1 Protected Resource Metadata (RFC 8414)
+        @self.app.get("/.well-known/oauth-protected-resource")
+        async def oauth_protected_resource_metadata(request: Request):
+            """
+            RFC 8414: OAuth 2.0 Protected Resource Metadata
+            Tells MCP clients where to find the authorization server
+            """
+            # Get server URL from request
+            server_url = f"{request.url.scheme}://{request.url.netloc}"
+
+            # Get auth server base URL (remove path)
+            auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
+
+            return JSONResponse({
+                "resource": f"{server_url}/mcp",
+                "authorization_servers": [auth_server_url],
+                "scopes_supported": ["tools:read", "tools:execute", "tools:admin"],
+                "bearer_methods_supported": ["header"],
+                "resource_documentation": "https://docs.authsec.dev/mcp-oauth"
+            })
 
         @self.app.get("/")
         async def root():
             return {
                 "name": self.app_name,
                 "version": "1.0.0",
-                "protocol": "mcp-with-oauth",
+                "protocol": "mcp-oauth-2.1",
                 "status": "running",
-                "auth_service": _config["auth_service_url"],
-                "services_url": _config["services_base_url"]
+                "auth_required": True,
+                "auth_method": "OAuth 2.1 with PKCE",
+                "auth_metadata": "/.well-known/oauth-protected-resource"
             }
 
         @self.app.post("/")
         async def mcp_endpoint(request: Request):
+            """
+            Main MCP endpoint with OAuth 2.1 authentication
+            Returns 401 Unauthorized if no valid Bearer token provided
+            """
             try:
+                # Check for Authorization header
+                auth_header = request.headers.get("Authorization")
+
+                if not auth_header or not auth_header.startswith("Bearer "):
+                    # No auth token - return 401 with OAuth metadata
+                    server_url = f"{request.url.scheme}://{request.url.netloc}"
+
+                    return JSONResponse(
+                        status_code=401,
+                        headers={
+                            "WWW-Authenticate": f'Bearer resource_metadata="{server_url}/.well-known/oauth-protected-resource", scope="tools:read tools:execute"'
+                        },
+                        content={
+                            "error": "unauthorized",
+                            "error_description": "Authentication required. Please authenticate using OAuth 2.1"
+                        }
+                    )
+
+                # Extract access token
+                access_token = auth_header.replace("Bearer ", "")
+
+                # Process MCP message with authentication
                 body = await request.body()
                 message = json.loads(body.decode('utf-8'))
-                response = await self._process_mcp_message(message)
+
+                response = await self._process_authenticated_mcp_message(
+                    message,
+                    request,
+                    access_token
+                )
+
                 return JSONResponse(response)
+
             except Exception as e:
+                logger.error(f"MCP endpoint error: {str(e)}")
                 return JSONResponse({
                     "jsonrpc": "2.0",
                     "id": None,
                     "error": {"code": -32603, "message": str(e)}
                 })
 
-    async def _process_mcp_message(self, message: Dict) -> Dict:
-        """Process MCP messages - delegate most logic to hosted service"""
+    async def _process_authenticated_mcp_message(
+        self,
+        message: Dict,
+        request: Request,
+        access_token: str
+    ) -> Dict:
+        """
+        Process MCP messages after OAuth 2.1 authentication
+        Validates token with SDK Manager and executes tools
+        """
         method = message.get("method")
         message_id = message.get("id")
         params = message.get("params", {})
 
+        # Track connection by client address
+        client_key = f"{request.client.host}:{request.client.port}"
+
         if method == "initialize":
+            # Generate unique connection ID
+            connection_id = f"conn_{os.urandom(6).hex()}"
+
+            # Validate token with SDK Manager
+            validation_result = await _make_auth_request(
+                "oauth/validate-token",
+                {
+                    "access_token": access_token,
+                    "connection_id": connection_id,
+                    "client_id": self.client_id,
+                    "app_name": self.app_name
+                }
+            )
+
+            if not validation_result.get("valid"):
+                error_desc = validation_result.get("error_description", "Invalid or expired access token")
+                raise Exception(f"Authentication failed: {error_desc}")
+
+            # Store connection info
+            self.connection_map[client_key] = {
+                "connection_id": connection_id,
+                "session_id": validation_result.get("session_id"),
+                "user_email": validation_result.get("user_email"),
+                "user_id": validation_result.get("user_id"),
+                "tenant_id": validation_result.get("tenant_id"),
+                "accessible_tools": validation_result.get("accessible_tools", []),
+                "access_token": access_token
+            }
+
+            logger.info(f"✅ Authenticated connection: {connection_id} for user {validation_result.get('user_email')}")
+
             return {
                 "jsonrpc": "2.0",
                 "id": message_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": self.app_name, "version": "1.0.0"}
+                    "serverInfo": {
+                        "name": self.app_name,
+                        "version": "1.0.0",
+                        "authenticated_user": validation_result.get("user_email")
+                    }
                 }
             }
 
-        elif method == "tools/list":
-            # Get protected tools from SDK Manager (with OAuth and RBAC)
-            tools_response = await _make_auth_request(
-                "tools/list",
-                {
-                    "client_id": self.client_id,
-                    "app_name": self.app_name,
-                    "user_tools": self.user_tools  # Protected tools with RBAC metadata
+        # Get connection info
+        connection_info = self.connection_map.get(client_key)
+        if not connection_info:
+            raise Exception("Connection not initialized. Please send 'initialize' request first.")
+
+        if method == "tools/list":
+            # Get accessible tools based on RBAC
+            accessible_tools = connection_info.get("accessible_tools", [])
+
+            # Filter user tools by RBAC
+            filtered_user_tools = [
+                tool for tool in self.user_tools
+                if tool.get("name") in accessible_tools
+            ]
+
+            # Generate tool schemas
+            tool_schemas = []
+            for tool_meta in filtered_user_tools:
+                schema = {
+                    "name": tool_meta.get("name"),
+                    "description": tool_meta.get("description", ""),
+                    "inputSchema": tool_meta.get("inputSchema", {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    })
                 }
-            )
+                tool_schemas.append(schema)
 
-            # Combine protected tools (from SDK Manager) with unprotected tools (local)
-            all_tools = tools_response.get("tools", []) + self.unprotected_tools
+            # Add oauth_logout tool
+            tool_schemas.append({
+                "name": "oauth_logout",
+                "description": "Logout and revoke access token",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            })
 
-            return {"jsonrpc": "2.0", "id": message_id, "result": {"tools": all_tools}}
+            # Add unprotected tools (available to everyone)
+            tool_schemas.extend(self.unprotected_tools)
+
+            logger.info(f"🔧 Returning {len(tool_schemas)} tools for user {connection_info.get('user_email')}")
+
+            return {
+                "jsonrpc": "2.0",
+                "id": message_id,
+                "result": {"tools": tool_schemas}
+            }
 
         elif method == "tools/call":
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
 
-            if tool_name.startswith("oauth_"):
-                # Delegate OAuth tools to hosted service
-                tool_response = await _make_auth_request(
-                    f"tools/call/{tool_name}",
-                    {
-                        "client_id": self.client_id,
-                        "app_name": self.app_name,
-                        "arguments": arguments
-                    }
-                )
-                content = tool_response.get("content", [{"type": "text", "text": json.dumps({"error": "Tool execution failed"})}])
-            elif tool_name in self.tool_handlers:
-                # Execute user's protected tools locally (they have the @protected_by_AuthSec decorator)
-                content = await self.tool_handlers[tool_name](arguments)
-            else:
-                content = [{"type": "text", "text": json.dumps({"error": f"Unknown tool: {tool_name}"})}]
+            # Inject session and user info into arguments
+            arguments["_session_id"] = connection_info.get("session_id")
+            arguments["_connection_id"] = connection_info.get("connection_id")
+            arguments["_access_token"] = access_token
+            arguments["_user_info"] = {
+                "user_id": connection_info.get("user_id"),
+                "email": connection_info.get("user_email"),
+                "tenant_id": connection_info.get("tenant_id")
+            }
 
-            return {"jsonrpc": "2.0", "id": message_id, "result": {"content": content}}
+            if tool_name == "oauth_logout":
+                # Logout
+                try:
+                    await _make_auth_request(
+                        "oauth/logout",
+                        {
+                            "session_id": connection_info.get("session_id"),
+                            "connection_id": connection_info.get("connection_id")
+                        }
+                    )
+
+                    # Remove from connection map
+                    if client_key in self.connection_map:
+                        del self.connection_map[client_key]
+
+                    content = [{
+                        "type": "text",
+                        "text": "✅ Successfully logged out. Reconnect to authenticate again."
+                    }]
+                except Exception as e:
+                    content = [{
+                        "type": "text",
+                        "text": f"⚠️ Logout error: {str(e)}"
+                    }]
+
+            elif tool_name in self.tool_handlers:
+                # Execute protected tool
+                try:
+                    content = await self.tool_handlers[tool_name](arguments)
+                except Exception as e:
+                    logger.error(f"Tool execution error for {tool_name}: {str(e)}")
+                    content = [{
+                        "type": "text",
+                        "text": json.dumps({"error": f"Tool execution failed: {str(e)}"})
+                    }]
+            else:
+                content = [{
+                    "type": "text",
+                    "text": json.dumps({"error": f"Unknown tool: {tool_name}"})
+                }]
+
+            return {
+                "jsonrpc": "2.0",
+                "id": message_id,
+                "result": {"content": content}
+            }
 
         else:
             return {
