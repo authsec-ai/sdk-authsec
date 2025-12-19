@@ -527,32 +527,105 @@ class MCPServer:
                 "resource_documentation": "https://docs.authsec.dev/mcp-oauth"
             })
 
-        # Redirect to SDK Manager's authorization server metadata
+        # Return OAuth authorization server metadata directly
         @self.app.get("/.well-known/oauth-authorization-server")
-        async def oauth_authorization_server_redirect():
+        async def oauth_authorization_server_metadata(request: Request):
             """
-            Redirect to SDK Manager's OAuth authorization server metadata
-            Some MCP clients request this directly instead of following authorization_servers
+            OAuth Authorization Server Metadata (RFC 8414)
+            Returns metadata with registration_endpoint pointing to THIS MCP server
+            This is CRITICAL: MCP clients expect to register with the MCP server, not the auth server!
             """
-            from fastapi.responses import RedirectResponse
+            # Get server URL from request
+            server_url = f"{request.url.scheme}://{request.url.netloc}"
 
+            # Get auth server base URL
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
-            metadata_url = f"{auth_server_url}/sdkmgr/mcp-auth/.well-known/oauth-authorization-server"
 
-            return RedirectResponse(url=metadata_url, status_code=307)
+            return JSONResponse({
+                "issuer": auth_server_url,
+                "authorization_endpoint": f"{auth_server_url}/oauth2/auth",
+                "token_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/token",
+                "revocation_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/revoke",
+                "registration_endpoint": f"{server_url}/register",  # CRITICAL: Point to MCP server's /register!
+
+                # MCP requires PKCE (S256)
+                "code_challenge_methods_supported": ["S256"],
+
+                # OAuth 2.1 only supports authorization_code grant
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "response_types_supported": ["code"],
+                "response_modes_supported": ["query"],
+
+                # Scopes for MCP tools
+                "scopes_supported": [
+                    "tools:read",
+                    "tools:execute",
+                    "tools:admin",
+                    "openid",
+                    "profile",
+                    "email"
+                ],
+
+                # Token endpoint auth methods
+                "token_endpoint_auth_methods_supported": [
+                    "none",  # Public clients (MCP clients don't have client secrets)
+                    "client_secret_post"
+                ],
+
+                # Security features
+                "require_pushed_authorization_requests": False,
+                "require_request_uri_registration": False,
+                "tls_client_certificate_bound_access_tokens": False,
+
+                # Additional metadata
+                "service_documentation": "https://docs.authsec.dev/mcp-oauth",
+                "ui_locales_supported": ["en-US"]
+            })
 
         # Some clients request OpenID configuration
         @self.app.get("/.well-known/openid-configuration")
-        async def openid_configuration_redirect():
+        async def openid_configuration_metadata(request: Request):
             """
-            Redirect to SDK Manager's OAuth metadata (same as oauth-authorization-server)
+            OpenID configuration metadata (same as oauth-authorization-server)
+            Returns metadata with registration_endpoint pointing to THIS MCP server
             """
-            from fastapi.responses import RedirectResponse
-
+            # Reuse the same logic as oauth_authorization_server_metadata
+            server_url = f"{request.url.scheme}://{request.url.netloc}"
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
-            metadata_url = f"{auth_server_url}/sdkmgr/mcp-auth/.well-known/oauth-authorization-server"
 
-            return RedirectResponse(url=metadata_url, status_code=307)
+            return JSONResponse({
+                "issuer": auth_server_url,
+                "authorization_endpoint": f"{auth_server_url}/oauth2/auth",
+                "token_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/token",
+                "revocation_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/revoke",
+                "registration_endpoint": f"{server_url}/register",  # Point to MCP server's /register
+
+                "code_challenge_methods_supported": ["S256"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "response_types_supported": ["code"],
+                "response_modes_supported": ["query"],
+
+                "scopes_supported": [
+                    "tools:read",
+                    "tools:execute",
+                    "tools:admin",
+                    "openid",
+                    "profile",
+                    "email"
+                ],
+
+                "token_endpoint_auth_methods_supported": [
+                    "none",
+                    "client_secret_post"
+                ],
+
+                "require_pushed_authorization_requests": False,
+                "require_request_uri_registration": False,
+                "tls_client_certificate_bound_access_tokens": False,
+
+                "service_documentation": "https://docs.authsec.dev/mcp-oauth",
+                "ui_locales_supported": ["en-US"]
+            })
 
         # Dynamic Client Registration (RFC 7591) - Not supported
         @self.app.post("/register")
