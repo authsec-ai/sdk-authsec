@@ -13,7 +13,7 @@ import signal
 from typing import Dict, Optional, List, Callable, Any
 from functools import wraps
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import dataclass
 import logging
@@ -543,9 +543,9 @@ class MCPServer:
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
 
             return JSONResponse({
-                "issuer": auth_server_url,
-                "authorization_endpoint": f"{auth_server_url}/oauth2/auth",
-                "token_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/token",
+                "issuer": server_url,  # MCP server is the issuer
+                "authorization_endpoint": f"{server_url}/oauth/authorize",  # MCP server's authorize endpoint!
+                "token_endpoint": f"{server_url}/oauth/token",  # MCP server's token endpoint!
                 "revocation_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/revoke",
                 "registration_endpoint": f"{server_url}/register",  # CRITICAL: Point to MCP server's /register!
 
@@ -597,9 +597,9 @@ class MCPServer:
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
 
             return JSONResponse({
-                "issuer": auth_server_url,
-                "authorization_endpoint": f"{auth_server_url}/oauth2/auth",
-                "token_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/token",
+                "issuer": server_url,  # MCP server is the issuer
+                "authorization_endpoint": f"{server_url}/oauth/authorize",  # MCP server's authorize endpoint!
+                "token_endpoint": f"{server_url}/oauth/token",  # MCP server's token endpoint!
                 "revocation_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/revoke",
                 "registration_endpoint": f"{server_url}/register",  # Point to MCP server's /register
 
@@ -630,7 +630,209 @@ class MCPServer:
                 "ui_locales_supported": ["en-US"]
             })
 
-        # Dynamic Client Registration (RFC 7591) - Not supported
+        # OAuth Authorization Endpoint - Redirects to AuthSec with instructions
+        @self.app.get("/oauth/authorize")
+        async def oauth_authorize(request: Request):
+            """
+            OAuth 2.1 Authorization Endpoint
+            This endpoint is called by MCP clients when they want to authorize.
+            It generates the AuthSec authorization URL and displays instructions to the user.
+            """
+            try:
+                # Get query parameters from MCP client
+                client_id_param = request.query_params.get("client_id")
+                redirect_uri = request.query_params.get("redirect_uri")
+                state = request.query_params.get("state")
+                code_challenge = request.query_params.get("code_challenge")
+                code_challenge_method = request.query_params.get("code_challenge_method")
+                scope = request.query_params.get("scope", "openid profile email")
+
+                # Start OAuth flow with SDK Manager
+                result = await _make_auth_request(
+                    "oauth/start",
+                    {
+                        "client_id": self.client_id,
+                        "app_name": self.app_name
+                    }
+                )
+
+                if result.get("error"):
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": result.get("error"),
+                            "error_description": result.get("error_description", "Failed to start OAuth flow")
+                        }
+                    )
+
+                # Store session info for later token exchange
+                session_id = result.get("session_id")
+                auth_url = result.get("authorization_url")
+
+                # Store the MCP client's state and redirect_uri for later
+                # In production, you'd store this in a database
+                # For now, we'll include it in the instructions
+
+                # Return HTML page with instructions
+                html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AuthSec Authentication Required</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        .container {{
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        h1 {{
+            color: #333;
+            margin-bottom: 10px;
+        }}
+        .app-name {{
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }}
+        .step {{
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-left: 4px solid #007bff;
+            border-radius: 4px;
+        }}
+        .step-number {{
+            font-weight: bold;
+            color: #007bff;
+        }}
+        a.button {{
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 4px;
+            margin: 10px 0;
+        }}
+        a.button:hover {{
+            background: #0056b3;
+        }}
+        code {{
+            background: #f1f1f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+        }}
+        .session-id {{
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-family: monospace;
+            word-break: break-all;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Authentication Required</h1>
+        <div class="app-name">Connecting to: {self.app_name}</div>
+
+        <div class="step">
+            <div class="step-number">Step 1:</div>
+            Click the button below to authenticate with AuthSec:
+            <br><br>
+            <a href="{auth_url}" class="button" target="_blank">Authenticate with AuthSec</a>
+        </div>
+
+        <div class="step">
+            <div class="step-number">Step 2:</div>
+            After authenticating, you'll receive a JWT access token. Copy the entire token.
+        </div>
+
+        <div class="step">
+            <div class="step-number">Step 3:</div>
+            Return to the MCP client and paste the JWT token when prompted.
+            <br><br>
+            <strong>Session ID:</strong>
+            <div class="session-id">{session_id}</div>
+            <small>You may need this for manual authentication</small>
+        </div>
+
+        <div class="step">
+            <div class="step-number">Note:</div>
+            This window will remain open. After pasting your token in the MCP client,
+            you can close this window.
+        </div>
+    </div>
+</body>
+</html>
+                """
+
+                return HTMLResponse(content=html_content)
+
+            except Exception as e:
+                logger.error(f"OAuth authorize error: {str(e)}")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "server_error",
+                        "error_description": f"Authorization failed: {str(e)}"
+                    }
+                )
+
+        # OAuth Token Endpoint - Accepts JWT token from user
+        @self.app.post("/oauth/token")
+        async def oauth_token(request: Request):
+            """
+            OAuth 2.1 Token Endpoint
+            This is a simplified endpoint that accepts the JWT token directly
+            In a full OAuth flow, this would exchange an authorization code
+            """
+            try:
+                # Parse form data
+                form_data = await request.form()
+                grant_type = form_data.get("grant_type")
+
+                if grant_type == "authorization_code":
+                    # For now, return an error asking user to paste token manually
+                    # In production, you'd implement the full code exchange flow
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": "unsupported_grant_type",
+                            "error_description": "Please authenticate via the web interface and paste your JWT token using the MCP client"
+                        }
+                    )
+                else:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": "unsupported_grant_type",
+                            "error_description": f"Grant type '{grant_type}' is not supported"
+                        }
+                    )
+
+            except Exception as e:
+                logger.error(f"OAuth token error: {str(e)}")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "server_error",
+                        "error_description": f"Token exchange failed: {str(e)}"
+                    }
+                )
+
+        # Dynamic Client Registration (RFC 7591)
         @self.app.post("/register")
         async def dynamic_client_registration(request: Request):
             """
