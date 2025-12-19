@@ -518,12 +518,9 @@ class MCPServer:
             host = request.headers.get("X-Forwarded-Host") or request.url.netloc
             server_url = f"{proto}://{host}"
 
-            # Get auth server base URL (remove path)
-            auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
-
             return JSONResponse({
                 "resource": f"{server_url}/mcp",
-                "authorization_servers": [auth_server_url],
+                "authorization_servers": [server_url],  # CRITICAL: Point to MCP server itself!
                 "scopes_supported": ["tools:read", "tools:execute", "tools:admin"],
                 "bearer_methods_supported": ["header"],
                 "resource_documentation": "https://docs.authsec.dev/mcp-oauth"
