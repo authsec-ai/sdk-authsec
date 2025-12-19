@@ -556,18 +556,55 @@ class MCPServer:
 
         # Dynamic Client Registration (RFC 7591) - Not supported
         @self.app.post("/register")
-        async def dynamic_client_registration():
+        async def dynamic_client_registration(request: Request):
             """
-            Dynamic Client Registration endpoint
-            Currently not supported - clients must be pre-registered
+            Dynamic Client Registration endpoint (RFC 7591)
+            Delegates to SDK Manager to register ephemeral OAuth clients
             """
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "invalid_client_metadata",
-                    "error_description": "Dynamic client registration is not supported. Please use a pre-registered client_id."
-                }
-            )
+            try:
+                # Get registration request from MCP client
+                body = await request.body()
+                registration_data = json.loads(body.decode('utf-8')) if body else {}
+
+                # Forward to SDK Manager for dynamic client registration
+                result = await _make_auth_request(
+                    "oauth/register",
+                    {
+                        "client_id": self.client_id,
+                        "app_name": self.app_name,
+                        "registration_data": registration_data
+                    }
+                )
+
+                if result.get("error"):
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": result.get("error"),
+                            "error_description": result.get("error_description", "Dynamic client registration failed")
+                        }
+                    )
+
+                # Return successful registration response
+                return JSONResponse({
+                    "client_id": result.get("client_id"),
+                    "client_secret": result.get("client_secret", ""),  # May be empty for public clients
+                    "client_id_issued_at": result.get("client_id_issued_at"),
+                    "client_secret_expires_at": result.get("client_secret_expires_at", 0),
+                    "grant_types": result.get("grant_types", ["authorization_code", "refresh_token"]),
+                    "response_types": result.get("response_types", ["code"]),
+                    "token_endpoint_auth_method": result.get("token_endpoint_auth_method", "none")
+                })
+
+            except Exception as e:
+                logger.error(f"Dynamic client registration error: {str(e)}")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "server_error",
+                        "error_description": f"Dynamic client registration failed: {str(e)}"
+                    }
+                )
 
         @self.app.get("/")
         async def root():
