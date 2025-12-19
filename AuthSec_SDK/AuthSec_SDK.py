@@ -513,8 +513,10 @@ class MCPServer:
             RFC 8414: OAuth 2.0 Protected Resource Metadata
             Tells MCP clients where to find the authorization server
             """
-            # Get server URL from request
-            server_url = f"{request.url.scheme}://{request.url.netloc}"
+            # Get server URL from request, respecting reverse proxy headers
+            proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
+            host = request.headers.get("X-Forwarded-Host") or request.url.netloc
+            server_url = f"{proto}://{host}"
 
             # Get auth server base URL (remove path)
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
@@ -535,8 +537,10 @@ class MCPServer:
             Returns metadata with registration_endpoint pointing to THIS MCP server
             This is CRITICAL: MCP clients expect to register with the MCP server, not the auth server!
             """
-            # Get server URL from request
-            server_url = f"{request.url.scheme}://{request.url.netloc}"
+            # Get server URL from request, respecting reverse proxy headers (DevTunnels, ngrok, etc.)
+            proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
+            host = request.headers.get("X-Forwarded-Host") or request.url.netloc
+            server_url = f"{proto}://{host}"
 
             # Get auth server base URL
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
@@ -590,7 +594,9 @@ class MCPServer:
             Returns metadata with registration_endpoint pointing to THIS MCP server
             """
             # Reuse the same logic as oauth_authorization_server_metadata
-            server_url = f"{request.url.scheme}://{request.url.netloc}"
+            proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
+            host = request.headers.get("X-Forwarded-Host") or request.url.netloc
+            server_url = f"{proto}://{host}"
             auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
 
             return JSONResponse({
@@ -703,7 +709,9 @@ class MCPServer:
 
                 if not auth_header or not auth_header.startswith("Bearer "):
                     # No auth token - return 401 with OAuth metadata
-                    server_url = f"{request.url.scheme}://{request.url.netloc}"
+                    proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
+                    host = request.headers.get("X-Forwarded-Host") or request.url.netloc
+                    server_url = f"{proto}://{host}"
 
                     return JSONResponse(
                         status_code=401,
