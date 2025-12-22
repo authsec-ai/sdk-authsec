@@ -13,7 +13,7 @@ import signal
 from typing import Dict, Optional, List, Callable, Any
 from functools import wraps
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import dataclass
 import logging
@@ -362,10 +362,6 @@ class MCPServer:
         self.unprotected_tools: List[Dict[str, Any]] = []  # Unprotected tools (standard MCP)
         self.tool_handlers: Dict[str, Callable] = {}  # All tool handlers (both protected and unprotected)
 
-        # OAuth 2.1 connection tracking
-        # Maps client_key (host:port) → connection_info
-        self.connection_map: Dict[str, Dict] = {}
-
         self.app = FastAPI(title=app_name, version="1.0.0")
         self.app.add_middleware(
             CORSMiddleware,
@@ -504,621 +500,88 @@ class MCPServer:
                     logger.info(f"Registered unprotected tool: {tool_name} (standard MCP tool, no auth required)")
 
     def _setup_routes(self):
-        """Setup MCP protocol routes with OAuth 2.1 support"""
-
-        # OAuth 2.1 Protected Resource Metadata (RFC 8414)
-        @self.app.get("/.well-known/oauth-protected-resource")
-        async def oauth_protected_resource_metadata(request: Request):
-            """
-            RFC 8414: OAuth 2.0 Protected Resource Metadata
-            Tells MCP clients where to find the authorization server
-            """
-            # Get server URL from request, respecting reverse proxy headers
-            proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
-            host = request.headers.get("X-Forwarded-Host") or request.url.netloc
-            server_url = f"{proto}://{host}"
-
-            return JSONResponse({
-                "resource": f"{server_url}/mcp",
-                "authorization_servers": [server_url],  # CRITICAL: Point to MCP server itself!
-                "scopes_supported": ["tools:read", "tools:execute", "tools:admin"],
-                "bearer_methods_supported": ["header"],
-                "resource_documentation": "https://docs.authsec.dev/mcp-oauth"
-            })
-
-        # Return OAuth authorization server metadata directly
-        @self.app.get("/.well-known/oauth-authorization-server")
-        async def oauth_authorization_server_metadata(request: Request):
-            """
-            OAuth Authorization Server Metadata (RFC 8414)
-            Returns metadata with registration_endpoint pointing to THIS MCP server
-            This is CRITICAL: MCP clients expect to register with the MCP server, not the auth server!
-            """
-            # Get server URL from request, respecting reverse proxy headers (DevTunnels, ngrok, etc.)
-            proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
-            host = request.headers.get("X-Forwarded-Host") or request.url.netloc
-            server_url = f"{proto}://{host}"
-
-            # Get auth server base URL
-            auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
-
-            return JSONResponse({
-                "issuer": server_url,  # MCP server is the issuer
-                "authorization_endpoint": f"{server_url}/oauth/authorize",  # MCP server's authorize endpoint!
-                "token_endpoint": f"{server_url}/oauth/token",  # MCP server's token endpoint!
-                "revocation_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/revoke",
-                "registration_endpoint": f"{server_url}/register",  # CRITICAL: Point to MCP server's /register!
-
-                # MCP requires PKCE (S256)
-                "code_challenge_methods_supported": ["S256"],
-
-                # OAuth 2.1 only supports authorization_code grant
-                "grant_types_supported": ["authorization_code", "refresh_token"],
-                "response_types_supported": ["code"],
-                "response_modes_supported": ["query"],
-
-                # Scopes for MCP tools
-                "scopes_supported": [
-                    "tools:read",
-                    "tools:execute",
-                    "tools:admin",
-                    "openid",
-                    "profile",
-                    "email"
-                ],
-
-                # Token endpoint auth methods
-                "token_endpoint_auth_methods_supported": [
-                    "none",  # Public clients (MCP clients don't have client secrets)
-                    "client_secret_post"
-                ],
-
-                # Security features
-                "require_pushed_authorization_requests": False,
-                "require_request_uri_registration": False,
-                "tls_client_certificate_bound_access_tokens": False,
-
-                # Additional metadata
-                "service_documentation": "https://docs.authsec.dev/mcp-oauth",
-                "ui_locales_supported": ["en-US"]
-            })
-
-        # Some clients request OpenID configuration
-        @self.app.get("/.well-known/openid-configuration")
-        async def openid_configuration_metadata(request: Request):
-            """
-            OpenID configuration metadata (same as oauth-authorization-server)
-            Returns metadata with registration_endpoint pointing to THIS MCP server
-            """
-            # Reuse the same logic as oauth_authorization_server_metadata
-            proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
-            host = request.headers.get("X-Forwarded-Host") or request.url.netloc
-            server_url = f"{proto}://{host}"
-            auth_server_url = _config["auth_service_url"].replace("/sdkmgr/mcp-auth", "")
-
-            return JSONResponse({
-                "issuer": server_url,  # MCP server is the issuer
-                "authorization_endpoint": f"{server_url}/oauth/authorize",  # MCP server's authorize endpoint!
-                "token_endpoint": f"{server_url}/oauth/token",  # MCP server's token endpoint!
-                "revocation_endpoint": f"{auth_server_url}/sdkmgr/mcp-auth/oauth/revoke",
-                "registration_endpoint": f"{server_url}/register",  # Point to MCP server's /register
-
-                "code_challenge_methods_supported": ["S256"],
-                "grant_types_supported": ["authorization_code", "refresh_token"],
-                "response_types_supported": ["code"],
-                "response_modes_supported": ["query"],
-
-                "scopes_supported": [
-                    "tools:read",
-                    "tools:execute",
-                    "tools:admin",
-                    "openid",
-                    "profile",
-                    "email"
-                ],
-
-                "token_endpoint_auth_methods_supported": [
-                    "none",
-                    "client_secret_post"
-                ],
-
-                "require_pushed_authorization_requests": False,
-                "require_request_uri_registration": False,
-                "tls_client_certificate_bound_access_tokens": False,
-
-                "service_documentation": "https://docs.authsec.dev/mcp-oauth",
-                "ui_locales_supported": ["en-US"]
-            })
-
-        # OAuth Authorization Endpoint - Redirects to AuthSec with instructions
-        @self.app.get("/oauth/authorize")
-        async def oauth_authorize(request: Request):
-            """
-            OAuth 2.1 Authorization Endpoint
-            This endpoint is called by MCP clients when they want to authorize.
-            It generates the AuthSec authorization URL and displays instructions to the user.
-            """
-            try:
-                # Get query parameters from MCP client
-                client_id_param = request.query_params.get("client_id")
-                redirect_uri = request.query_params.get("redirect_uri")
-                state = request.query_params.get("state")
-                code_challenge = request.query_params.get("code_challenge")
-                code_challenge_method = request.query_params.get("code_challenge_method")
-                scope = request.query_params.get("scope", "openid profile email")
-
-                # Start OAuth flow with SDK Manager
-                result = await _make_auth_request(
-                    "oauth/start",
-                    {
-                        "client_id": self.client_id,
-                        "app_name": self.app_name
-                    }
-                )
-
-                if result.get("error"):
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": result.get("error"),
-                            "error_description": result.get("error_description", "Failed to start OAuth flow")
-                        }
-                    )
-
-                # Store session info for later token exchange
-                session_id = result.get("session_id")
-                auth_url = result.get("authorization_url")
-
-                # Store the MCP client's state and redirect_uri for later
-                # In production, you'd store this in a database
-                # For now, we'll include it in the instructions
-
-                # Return HTML page with instructions
-                html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>AuthSec Authentication Required</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            max-width: 600px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }}
-        .container {{
-            background: white;
-            padding: 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #333;
-            margin-bottom: 10px;
-        }}
-        .app-name {{
-            color: #666;
-            font-size: 14px;
-            margin-bottom: 20px;
-        }}
-        .step {{
-            margin: 20px 0;
-            padding: 15px;
-            background: #f8f9fa;
-            border-left: 4px solid #007bff;
-            border-radius: 4px;
-        }}
-        .step-number {{
-            font-weight: bold;
-            color: #007bff;
-        }}
-        a.button {{
-            display: inline-block;
-            background: #007bff;
-            color: white;
-            padding: 12px 24px;
-            text-decoration: none;
-            border-radius: 4px;
-            margin: 10px 0;
-        }}
-        a.button:hover {{
-            background: #0056b3;
-        }}
-        code {{
-            background: #f1f1f1;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 12px;
-        }}
-        .session-id {{
-            background: #fff3cd;
-            border: 1px solid #ffc107;
-            padding: 10px;
-            border-radius: 4px;
-            margin: 10px 0;
-            font-family: monospace;
-            word-break: break-all;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔐 Authentication Required</h1>
-        <div class="app-name">Connecting to: {self.app_name}</div>
-
-        <div class="step">
-            <div class="step-number">Step 1:</div>
-            Click the button below to authenticate with AuthSec:
-            <br><br>
-            <a href="{auth_url}" class="button" target="_blank">Authenticate with AuthSec</a>
-        </div>
-
-        <div class="step">
-            <div class="step-number">Step 2:</div>
-            After authenticating, you'll receive a JWT access token. Copy the entire token.
-        </div>
-
-        <div class="step">
-            <div class="step-number">Step 3:</div>
-            Return to the MCP client and paste the JWT token when prompted.
-            <br><br>
-            <strong>Session ID:</strong>
-            <div class="session-id">{session_id}</div>
-            <small>You may need this for manual authentication</small>
-        </div>
-
-        <div class="step">
-            <div class="step-number">Note:</div>
-            This window will remain open. After pasting your token in the MCP client,
-            you can close this window.
-        </div>
-    </div>
-</body>
-</html>
-                """
-
-                return HTMLResponse(content=html_content)
-
-            except Exception as e:
-                logger.error(f"OAuth authorize error: {str(e)}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": "server_error",
-                        "error_description": f"Authorization failed: {str(e)}"
-                    }
-                )
-
-        # OAuth Token Endpoint - Accepts JWT token from user
-        @self.app.post("/oauth/token")
-        async def oauth_token(request: Request):
-            """
-            OAuth 2.1 Token Endpoint
-            This is a simplified endpoint that accepts the JWT token directly
-            In a full OAuth flow, this would exchange an authorization code
-            """
-            try:
-                # Parse form data
-                form_data = await request.form()
-                grant_type = form_data.get("grant_type")
-
-                if grant_type == "authorization_code":
-                    # For now, return an error asking user to paste token manually
-                    # In production, you'd implement the full code exchange flow
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": "unsupported_grant_type",
-                            "error_description": "Please authenticate via the web interface and paste your JWT token using the MCP client"
-                        }
-                    )
-                else:
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": "unsupported_grant_type",
-                            "error_description": f"Grant type '{grant_type}' is not supported"
-                        }
-                    )
-
-            except Exception as e:
-                logger.error(f"OAuth token error: {str(e)}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": "server_error",
-                        "error_description": f"Token exchange failed: {str(e)}"
-                    }
-                )
-
-        # Dynamic Client Registration (RFC 7591)
-        @self.app.post("/register")
-        async def dynamic_client_registration(request: Request):
-            """
-            Dynamic Client Registration endpoint (RFC 7591)
-            Delegates to SDK Manager to register ephemeral OAuth clients
-            """
-            try:
-                # Get registration request from MCP client
-                body = await request.body()
-                registration_data = json.loads(body.decode('utf-8')) if body else {}
-
-                # Forward to SDK Manager for dynamic client registration
-                result = await _make_auth_request(
-                    "oauth/register",
-                    {
-                        "client_id": self.client_id,
-                        "app_name": self.app_name,
-                        "registration_data": registration_data
-                    }
-                )
-
-                if result.get("error"):
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": result.get("error"),
-                            "error_description": result.get("error_description", "Dynamic client registration failed")
-                        }
-                    )
-
-                # Return successful registration response
-                return JSONResponse({
-                    "client_id": result.get("client_id"),
-                    "client_secret": result.get("client_secret", ""),  # May be empty for public clients
-                    "client_id_issued_at": result.get("client_id_issued_at"),
-                    "client_secret_expires_at": result.get("client_secret_expires_at", 0),
-                    "grant_types": result.get("grant_types", ["authorization_code", "refresh_token"]),
-                    "response_types": result.get("response_types", ["code"]),
-                    "token_endpoint_auth_method": result.get("token_endpoint_auth_method", "none")
-                })
-
-            except Exception as e:
-                logger.error(f"Dynamic client registration error: {str(e)}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": "server_error",
-                        "error_description": f"Dynamic client registration failed: {str(e)}"
-                    }
-                )
+        """Setup MCP protocol routes"""
 
         @self.app.get("/")
         async def root():
             return {
                 "name": self.app_name,
                 "version": "1.0.0",
-                "protocol": "mcp-oauth-2.1",
+                "protocol": "mcp-with-oauth",
                 "status": "running",
-                "auth_required": True,
-                "auth_method": "OAuth 2.1 with PKCE",
-                "auth_metadata": "/.well-known/oauth-protected-resource"
+                "auth_service": _config["auth_service_url"],
+                "services_url": _config["services_base_url"]
             }
 
         @self.app.post("/")
         async def mcp_endpoint(request: Request):
-            """
-            Main MCP endpoint with OAuth 2.1 authentication
-            Returns 401 Unauthorized if no valid Bearer token provided
-            """
             try:
-                # Check for Authorization header
-                auth_header = request.headers.get("Authorization")
-
-                if not auth_header or not auth_header.startswith("Bearer "):
-                    # No auth token - return 401 with OAuth metadata
-                    proto = request.headers.get("X-Forwarded-Proto") or request.url.scheme
-                    host = request.headers.get("X-Forwarded-Host") or request.url.netloc
-                    server_url = f"{proto}://{host}"
-
-                    return JSONResponse(
-                        status_code=401,
-                        headers={
-                            "WWW-Authenticate": f'Bearer resource_metadata="{server_url}/.well-known/oauth-protected-resource", scope="tools:read tools:execute"'
-                        },
-                        content={
-                            "error": "unauthorized",
-                            "error_description": "Authentication required. Please authenticate using OAuth 2.1"
-                        }
-                    )
-
-                # Extract access token
-                access_token = auth_header.replace("Bearer ", "")
-
-                # Process MCP message with authentication
                 body = await request.body()
                 message = json.loads(body.decode('utf-8'))
-
-                response = await self._process_authenticated_mcp_message(
-                    message,
-                    request,
-                    access_token
-                )
-
+                response = await self._process_mcp_message(message)
                 return JSONResponse(response)
-
             except Exception as e:
-                logger.error(f"MCP endpoint error: {str(e)}")
                 return JSONResponse({
                     "jsonrpc": "2.0",
                     "id": None,
                     "error": {"code": -32603, "message": str(e)}
                 })
 
-    async def _process_authenticated_mcp_message(
-        self,
-        message: Dict,
-        request: Request,
-        access_token: str
-    ) -> Dict:
-        """
-        Process MCP messages after OAuth 2.1 authentication
-        Validates token with SDK Manager and executes tools
-        """
+    async def _process_mcp_message(self, message: Dict) -> Dict:
+        """Process MCP messages - delegate most logic to hosted service"""
         method = message.get("method")
         message_id = message.get("id")
         params = message.get("params", {})
 
-        # Track connection by client address
-        client_key = f"{request.client.host}:{request.client.port}"
-
         if method == "initialize":
-            # Generate unique connection ID
-            connection_id = f"conn_{os.urandom(6).hex()}"
-
-            # Validate token with SDK Manager
-            validation_result = await _make_auth_request(
-                "oauth/validate-token",
-                {
-                    "access_token": access_token,
-                    "connection_id": connection_id,
-                    "client_id": self.client_id,
-                    "app_name": self.app_name
-                }
-            )
-
-            if not validation_result.get("valid"):
-                error_desc = validation_result.get("error_description", "Invalid or expired access token")
-                raise Exception(f"Authentication failed: {error_desc}")
-
-            # Store connection info
-            self.connection_map[client_key] = {
-                "connection_id": connection_id,
-                "session_id": validation_result.get("session_id"),
-                "user_email": validation_result.get("user_email"),
-                "user_id": validation_result.get("user_id"),
-                "tenant_id": validation_result.get("tenant_id"),
-                "accessible_tools": validation_result.get("accessible_tools", []),
-                "access_token": access_token
-            }
-
-            logger.info(f"✅ Authenticated connection: {connection_id} for user {validation_result.get('user_email')}")
-
             return {
                 "jsonrpc": "2.0",
                 "id": message_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {
-                        "name": self.app_name,
-                        "version": "1.0.0",
-                        "authenticated_user": validation_result.get("user_email")
-                    }
+                    "serverInfo": {"name": self.app_name, "version": "1.0.0"}
                 }
             }
 
-        # Get connection info
-        connection_info = self.connection_map.get(client_key)
-        if not connection_info:
-            raise Exception("Connection not initialized. Please send 'initialize' request first.")
-
-        if method == "tools/list":
-            # Get accessible tools based on RBAC
-            accessible_tools = connection_info.get("accessible_tools", [])
-
-            # Filter user tools by RBAC
-            filtered_user_tools = [
-                tool for tool in self.user_tools
-                if tool.get("name") in accessible_tools
-            ]
-
-            # Generate tool schemas
-            tool_schemas = []
-            for tool_meta in filtered_user_tools:
-                schema = {
-                    "name": tool_meta.get("name"),
-                    "description": tool_meta.get("description", ""),
-                    "inputSchema": tool_meta.get("inputSchema", {
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    })
+        elif method == "tools/list":
+            # Get protected tools from SDK Manager (with OAuth and RBAC)
+            tools_response = await _make_auth_request(
+                "tools/list",
+                {
+                    "client_id": self.client_id,
+                    "app_name": self.app_name,
+                    "user_tools": self.user_tools  # Protected tools with RBAC metadata
                 }
-                tool_schemas.append(schema)
+            )
 
-            # Add oauth_logout tool
-            tool_schemas.append({
-                "name": "oauth_logout",
-                "description": "Logout and revoke access token",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {}
-                }
-            })
+            # Combine protected tools (from SDK Manager) with unprotected tools (local)
+            all_tools = tools_response.get("tools", []) + self.unprotected_tools
 
-            # Add unprotected tools (available to everyone)
-            tool_schemas.extend(self.unprotected_tools)
-
-            logger.info(f"🔧 Returning {len(tool_schemas)} tools for user {connection_info.get('user_email')}")
-
-            return {
-                "jsonrpc": "2.0",
-                "id": message_id,
-                "result": {"tools": tool_schemas}
-            }
+            return {"jsonrpc": "2.0", "id": message_id, "result": {"tools": all_tools}}
 
         elif method == "tools/call":
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
 
-            # Inject session and user info into arguments
-            arguments["_session_id"] = connection_info.get("session_id")
-            arguments["_connection_id"] = connection_info.get("connection_id")
-            arguments["_access_token"] = access_token
-            arguments["_user_info"] = {
-                "user_id": connection_info.get("user_id"),
-                "email": connection_info.get("user_email"),
-                "tenant_id": connection_info.get("tenant_id")
-            }
-
-            if tool_name == "oauth_logout":
-                # Logout
-                try:
-                    await _make_auth_request(
-                        "oauth/logout",
-                        {
-                            "session_id": connection_info.get("session_id"),
-                            "connection_id": connection_info.get("connection_id")
-                        }
-                    )
-
-                    # Remove from connection map
-                    if client_key in self.connection_map:
-                        del self.connection_map[client_key]
-
-                    content = [{
-                        "type": "text",
-                        "text": "✅ Successfully logged out. Reconnect to authenticate again."
-                    }]
-                except Exception as e:
-                    content = [{
-                        "type": "text",
-                        "text": f"⚠️ Logout error: {str(e)}"
-                    }]
-
+            if tool_name.startswith("oauth_"):
+                # Delegate OAuth tools to hosted service
+                tool_response = await _make_auth_request(
+                    f"tools/call/{tool_name}",
+                    {
+                        "client_id": self.client_id,
+                        "app_name": self.app_name,
+                        "arguments": arguments
+                    }
+                )
+                content = tool_response.get("content", [{"type": "text", "text": json.dumps({"error": "Tool execution failed"})}])
             elif tool_name in self.tool_handlers:
-                # Execute protected tool
-                try:
-                    content = await self.tool_handlers[tool_name](arguments)
-                except Exception as e:
-                    logger.error(f"Tool execution error for {tool_name}: {str(e)}")
-                    content = [{
-                        "type": "text",
-                        "text": json.dumps({"error": f"Tool execution failed: {str(e)}"})
-                    }]
+                # Execute user's protected tools locally (they have the @protected_by_AuthSec decorator)
+                content = await self.tool_handlers[tool_name](arguments)
             else:
-                content = [{
-                    "type": "text",
-                    "text": json.dumps({"error": f"Unknown tool: {tool_name}"})
-                }]
+                content = [{"type": "text", "text": json.dumps({"error": f"Unknown tool: {tool_name}"})}]
 
-            return {
-                "jsonrpc": "2.0",
-                "id": message_id,
-                "result": {"content": content}
-            }
+            return {"jsonrpc": "2.0", "id": message_id, "result": {"content": content}}
 
         else:
             return {

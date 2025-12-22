@@ -20,7 +20,7 @@ try:
 except ImportError:
     WorkloadSVID = None
 
-__version__ = "4.0.7"
+__version__ = "3.5.1"
 __all__ = [
     # MCP Auth & Services
     "protected_by_AuthSec",
