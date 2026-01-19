@@ -2,8 +2,8 @@ from setuptools import setup, find_packages
 
 setup(
     name="AuthSec_SDK",
-    version="3.5.1",
-    description="AuthSec SDK for MCP_AUTH, SERVICES, and SPIRE integration",
+    version="3.6.0",
+    description="AuthSec SDK for MCP_AUTH, SERVICES, CIBA, and SPIRE integration",
     author="AuthSec Team",
     email="a@authnull.com",
     packages=find_packages(),
@@ -15,7 +15,8 @@ setup(
         "psutil",
         "asyncpgsa",
         "grpcio>=1.60.0",
-        "protobuf>=5.29.0,<6.0.0"
+        "protobuf>=5.29.0,<6.0.0",
+        "requests"
     ],
     python_requires=">=3.10.11",
 )

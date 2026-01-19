@@ -11,6 +11,9 @@ from .AuthSec_SDK import (
     test_services
 )
 
+# Import CIBA SDK for voice clients and passwordless authentication
+from .ciba_sdk import CIBAClient
+
 # Import standalone SPIFFE Workload API SDK
 from .spiffe_workload_api import QuickStartSVID, WorkloadAPIClient
 
@@ -20,7 +23,7 @@ try:
 except ImportError:
     WorkloadSVID = None
 
-__version__ = "3.5.1"
+__version__ = "4.0.0"
 __all__ = [
     # MCP Auth & Services
     "protected_by_AuthSec",
@@ -32,6 +35,8 @@ __all__ = [
     "is_configured",
     "test_auth_service",
     "test_services",
+    # CIBA SDK for Voice Clients
+    "CIBAClient",
     # SPIRE Workload Identity (Standalone SDK)
     "QuickStartSVID",
     "WorkloadAPIClient",
