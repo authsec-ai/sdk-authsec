@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: AuthSec-SDK
+Version: 3.6.0
+Summary: AuthSec SDK for MCP_AUTH, SERVICES, CIBA, and SPIRE integration
+Author: AuthSec Team
+Requires-Python: >=3.10.11

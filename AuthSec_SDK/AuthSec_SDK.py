@@ -4,6 +4,8 @@ Minimal MCP server implementation that delegates to hosted SDK Manager
 """
 
 import json
+import os
+import urllib.parse
 import aiohttp
 import asyncio
 import inspect
@@ -29,6 +31,51 @@ _config = {
     "timeout": 10,
     "retries": 3
 }
+
+
+# In-memory session cache for user info (best-effort, used for oauth_user_info)
+_session_user_info: Dict[str, Any] = {}
+
+
+def _decode_jwt_unverified(token: str) -> Dict[str, Any]:
+    # Decode JWT payload without verification (for cache/debug only).
+    try:
+        parts = token.split('.')
+        if len(parts) < 2:
+            return {}
+        payload_b64 = parts[1]
+        # pad base64
+        padding = '=' * (-len(payload_b64) % 4)
+        payload_bytes = __import__('base64').urlsafe_b64decode(payload_b64 + padding)
+        data = json.loads(payload_bytes.decode('utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _normalize_runtime_client_id(client_id: str) -> str:
+    """
+    Normalize caller-provided client_id to the runtime form expected by SDK Manager.
+    Accepts:
+    - base UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+    - base UUID with underscores
+    - already-suffixed IDs (`...-main-client` or `..._main-client`)
+    """
+    raw = str(client_id or "").strip().strip('"').strip("'")
+    if not raw:
+        raise ValueError("client_id must be a non-empty string")
+
+    raw = raw.replace("_main-client", "-main-client")
+    if raw.endswith("-main-client"):
+        base = raw[: -len("-main-client")]
+    else:
+        base = raw
+
+    # Normalize UUID-like underscore format to hyphen format.
+    if "_" in base and base.count("_") == 4:
+        base = base.replace("_", "-")
+
+    return f"{base}-main-client"
+
 
 @dataclass
 class ServiceCredentials:
@@ -173,6 +220,97 @@ async def _make_services_request(endpoint: str, payload: Dict[str, Any] = None, 
         "message": "Could not complete services request"
     }
 
+
+
+def _normalize_claim_list(value):
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {str(v) for v in value if v is not None and str(v) != ""}
+    return set()
+
+
+def _evaluate_rbac(user_info, requirements):
+    roles_req = set(requirements.get("roles") or [])
+    groups_req = set(requirements.get("groups") or [])
+    resources_req = set(requirements.get("resources") or [])
+    scopes_req = set(requirements.get("scopes") or [])
+    perms_req = set(requirements.get("permissions") or [])
+    require_all = bool(requirements.get("require_all"))
+
+    user_roles = _normalize_claim_list(user_info.get("roles"))
+    user_groups = _normalize_claim_list(user_info.get("groups"))
+
+    raw_scopes = _normalize_claim_list(user_info.get("scopes")) | _normalize_claim_list(user_info.get("scope"))
+
+    user_resources = _normalize_claim_list(user_info.get("resources"))
+    user_resources |= {s.split(":", 1)[0] for s in raw_scopes if "\:" in s}
+
+    user_scopes = {s for s in raw_scopes if "\:" not in s}
+    user_scopes |= {s.split(":", 1)[1] for s in raw_scopes if "\:" in s}
+
+    user_perms = _normalize_claim_list(user_info.get("permissions"))
+    user_perms |= {s for s in raw_scopes if "\:" in s}
+
+    checks = {}
+    if roles_req:
+        checks["roles"] = bool(user_roles & roles_req)
+    if groups_req:
+        checks["groups"] = bool(user_groups & groups_req)
+    if resources_req:
+        checks["resources"] = bool(user_resources & resources_req)
+    if scopes_req:
+        checks["scopes"] = bool(user_scopes & scopes_req)
+    if perms_req:
+        if user_perms:
+            checks["permissions"] = bool(user_perms & perms_req)
+        else:
+            allowed = False
+            for perm in perms_req:
+                if ":" in perm:
+                    res, act = perm.split(":", 1)
+                    if res in user_resources and act in user_scopes:
+                        allowed = True
+                        break
+            checks["permissions"] = allowed
+
+    # No RBAC requirements -> allow
+    if not checks:
+        return True, ""
+
+    if require_all:
+        missing = [k for k, ok in checks.items() if not ok]
+        if missing:
+            return False, f"missing required {', '.join(missing)}"
+        return True, ""
+
+    # OR logic across categories
+    if any(checks.values()):
+        return True, ""
+    return False, "no RBAC requirement satisfied"
+
+
+
+def _normalize_oauth_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    # Normalize oauth tool arguments to avoid list-vs-string errors in auth service.
+    if not isinstance(arguments, dict):
+        return arguments
+    args = dict(arguments)
+
+    def _coerce_to_str(value):
+        if isinstance(value, list):
+            if len(value) == 1:
+                return str(value[0])
+            return " ".join(str(v) for v in value)
+        return value
+
+    for key, value in list(args.items()):
+        args[key] = _coerce_to_str(value)
+
+    return args
+
 def mcp_tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
@@ -271,14 +409,6 @@ def protected_by_AuthSec(
             # Extract session ID from arguments
             session_id = arguments.get("session_id")
 
-            if not session_id:
-                error_response = {
-                    "error": "Authentication required",
-                    "message": f"Tool '{tool_name}' requires authentication. Please provide session_id.",
-                    "tool": tool_name
-                }
-                return [{"type": "text", "text": json.dumps(error_response)}]
-
             # Single API call to auth service for tool protection
             payload = {
                 "session_id": session_id,
@@ -298,8 +428,26 @@ def protected_by_AuthSec(
                 }
                 return [{"type": "text", "text": json.dumps(error_response)}]
 
+            resolved_session_id = protection_result.get("session_id") or session_id
+            user_info = protection_result.get("user_info", {}) or {}
+            if resolved_session_id:
+                _session_user_info[str(resolved_session_id)] = user_info
+                # Make resolved session_id available to downstream tool logic.
+                arguments["session_id"] = resolved_session_id
+            print(json.dumps(user_info, indent=2))
+
+            # Enforce RBAC at execution time
+            rbac_ok, rbac_reason = _evaluate_rbac(user_info, func._rbac_requirements)
+            if not rbac_ok:
+                error_response = {
+                    "error": "Access denied",
+                    "message": f"RBAC denied: {rbac_reason}",
+                    "tool": tool_name
+                }
+                return [{"type": "text", "text": json.dumps(error_response)}]
+
             # Add user info to arguments for the business function
-            arguments["_user_info"] = protection_result.get("user_info", {})
+            arguments["_user_info"] = user_info
 
             # Create session object if function expects it
             if expects_session:
@@ -312,7 +460,7 @@ def protected_by_AuthSec(
                         self.user_id = user_info.get("user_id")
                         self.org_id = user_info.get("org_id")
 
-                session_obj = SimpleSession(session_id, protection_result.get("user_info", {}))
+                session_obj = SimpleSession(str(resolved_session_id or ""), protection_result.get("user_info", {}))
 
                 # Call the original business function with session
                 try:
@@ -344,6 +492,9 @@ def protected_by_AuthSec(
 
         # Copy RBAC requirements to wrapper for introspection
         wrapper._rbac_requirements = func._rbac_requirements
+        wrapper._tool_description = func._tool_description
+        wrapper._tool_inputSchema = func._tool_inputSchema
+        wrapper._authsec_tool_name = tool_name
 
         return wrapper
     return decorator
@@ -454,8 +605,10 @@ class MCPServer:
                     inputSchema = getattr(obj, '_tool_inputSchema', None)
 
                     # Store tool with its RBAC metadata, description, and inputSchema
+                    tool_name = getattr(obj, '_authsec_tool_name', name)
+
                     tool_metadata = {
-                        "name": name,
+                        "name": tool_name,
                         "rbac": rbac_requirements
                     }
 
@@ -468,7 +621,7 @@ class MCPServer:
                         tool_metadata["inputSchema"] = inputSchema
 
                     self.user_tools.append(tool_metadata)
-                    self.tool_handlers[name] = obj
+                    self.tool_handlers[tool_name] = obj
                 else:
                     # Unprotected tool - register as standard MCP tool (no SDK Manager involvement)
                     self.tool_handlers[name] = obj
@@ -518,7 +671,7 @@ class MCPServer:
             try:
                 body = await request.body()
                 message = json.loads(body.decode('utf-8'))
-                response = await self._process_mcp_message(message)
+                response = await self._process_mcp_message(message, request)
                 return JSONResponse(response)
             except Exception as e:
                 return JSONResponse({
@@ -527,7 +680,90 @@ class MCPServer:
                     "error": {"code": -32603, "message": str(e)}
                 })
 
-    async def _process_mcp_message(self, message: Dict) -> Dict:
+    def _oauth_tools_fallback(self) -> List[Dict[str, Any]]:
+        """Local fallback OAuth tools if auth service tools/list is unavailable."""
+        return [
+            {
+                "name": "oauth_start",
+                "description": "Start OAuth authentication flow",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "open_browser": {"type": "boolean"},
+                        "return_url": {"type": "string"}
+                    },
+                    "required": []
+                },
+            },
+            {
+                "name": "oauth_authenticate",
+                "description": "Authenticate with JWT token",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "jwt_token": {"type": "string"},
+                        "session_id": {"type": "string"},
+                        "expires_in": {"type": "number"},
+                    },
+                    "required": ["jwt_token", "session_id"],
+                },
+            },
+            {
+                "name": "oauth_status",
+                "description": "Check authentication status",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"session_id": {"type": "string"}},
+                    "required": ["session_id"],
+                },
+            },
+            {
+                "name": "oauth_logout",
+                "description": "Logout and invalidate session",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"session_id": {"type": "string"}},
+                    "required": ["session_id"],
+                },
+            },
+            {
+                "name": "oauth_user_info",
+                "description": "Get user information for authenticated session",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"session_id": {"type": "string"}},
+                    "required": ["session_id"],
+                },
+            },
+        ]
+
+    def _derive_return_url(self, request: Request) -> Optional[str]:
+        """
+        Best-effort return URL discovery from MCP client request context.
+        Priority:
+        1) Referer
+        2) Origin
+        """
+        referer = request.headers.get("referer")
+        if referer:
+            try:
+                parsed = urllib.parse.urlparse(referer)
+                if parsed.scheme in {"http", "https"} and parsed.netloc:
+                    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, parsed.fragment))
+            except Exception:
+                pass
+
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                parsed = urllib.parse.urlparse(origin)
+                if parsed.scheme in {"http", "https"} and parsed.netloc:
+                    return f"{parsed.scheme}://{parsed.netloc}/"
+            except Exception:
+                pass
+        return None
+
+    async def _process_mcp_message(self, message: Dict, request: Optional[Request] = None) -> Dict:
         """Process MCP messages - delegate most logic to hosted service"""
         method = message.get("method")
         message_id = message.get("id")
@@ -545,18 +781,31 @@ class MCPServer:
             }
 
         elif method == "tools/list":
-            # Get protected tools from SDK Manager (with OAuth and RBAC)
-            tools_response = await _make_auth_request(
-                "tools/list",
-                {
-                    "client_id": self.client_id,
-                    "app_name": self.app_name,
-                    "user_tools": self.user_tools  # Protected tools with RBAC metadata
+            # Get protected tools from SDK Manager (with OAuth and RBAC), with a hard cap to avoid MCP timeout.
+            try:
+                tools_response = await asyncio.wait_for(
+                    _make_auth_request(
+                        "tools/list",
+                        {
+                            "client_id": self.client_id,
+                            "app_name": self.app_name,
+                            "user_tools": self.user_tools  # Protected tools with RBAC metadata
+                        }
+                    ),
+                    timeout=float(os.getenv("AUTHSEC_TOOLS_LIST_TIMEOUT_SECONDS", "8")),
+                )
+            except asyncio.TimeoutError:
+                tools_response = {
+                    "error": "tools/list timed out against auth service"
                 }
-            )
 
             # Combine protected tools (from SDK Manager) with unprotected tools (local)
-            all_tools = tools_response.get("tools", []) + self.unprotected_tools
+            remote_tools = tools_response.get("tools", []) if isinstance(tools_response, dict) else []
+            if not remote_tools:
+                # Never return empty tools list just because upstream auth listing failed.
+                remote_tools = self._oauth_tools_fallback()
+
+            all_tools = remote_tools + self.unprotected_tools
 
             return {"jsonrpc": "2.0", "id": message_id, "result": {"tools": all_tools}}
 
@@ -564,8 +813,29 @@ class MCPServer:
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
 
+            # Best-effort local cache for oauth_user_info to avoid upstream split errors
+            if tool_name == "oauth_user_info":
+                session_id = arguments.get("session_id")
+                if session_id and session_id in _session_user_info:
+                    content = [{"type": "text", "text": json.dumps(_session_user_info[session_id])}]
+                    return {"jsonrpc": "2.0", "id": message_id, "result": {"content": content}}
+
+            # Capture JWT on oauth_authenticate for cache (if provided)
+            if tool_name == "oauth_authenticate":
+                session_id = arguments.get("session_id")
+                token = (arguments.get("token") or arguments.get("jwt") or arguments.get("access_token"))
+                if session_id and isinstance(token, str):
+                    decoded = _decode_jwt_unverified(token)
+                    if decoded:
+                        _session_user_info[session_id] = decoded
+
             if tool_name.startswith("oauth_"):
                 # Delegate OAuth tools to hosted service
+                arguments = _normalize_oauth_arguments(arguments)
+                if tool_name == "oauth_start" and isinstance(arguments, dict) and "return_url" not in arguments and request is not None:
+                    auto_return_url = self._derive_return_url(request)
+                    if auto_return_url:
+                        arguments["return_url"] = auto_return_url
                 tool_response = await _make_auth_request(
                     f"tools/call/{tool_name}",
                     {
@@ -574,7 +844,22 @@ class MCPServer:
                         "arguments": arguments
                     }
                 )
-                content = tool_response.get("content", [{"type": "text", "text": json.dumps({"error": "Tool execution failed"})}])
+                if isinstance(tool_response, dict) and isinstance(tool_response.get("content"), list):
+                    content = tool_response["content"]
+                else:
+                    # Preserve useful upstream diagnostics instead of collapsing to a generic error.
+                    error_payload = {
+                        "error": "Tool execution failed",
+                        "tool": tool_name,
+                    }
+                    if isinstance(tool_response, dict):
+                        if "detail" in tool_response:
+                            error_payload["detail"] = tool_response.get("detail")
+                        if "error" in tool_response:
+                            error_payload["upstream_error"] = tool_response.get("error")
+                        if "message" in tool_response:
+                            error_payload["upstream_message"] = tool_response.get("message")
+                    content = [{"type": "text", "text": json.dumps(error_payload)}]
             elif tool_name in self.tool_handlers:
                 # Execute user's protected tools locally (they have the @protected_by_AuthSec decorator)
                 content = await self.tool_handlers[tool_name](arguments)
@@ -598,6 +883,9 @@ def run_mcp_server_with_oauth(
     port: int = 3005,
     spire_socket_path: Optional[str] = None
 ):
+
+    auth_service_url = os.getenv("AUTHSEC_AUTH_SERVICE_URL")
+    services_base_url = os.getenv("AUTHSEC_SERVICES_URL")
     """
     Run MCP server using SDK Manager for auth
 
@@ -611,7 +899,18 @@ def run_mcp_server_with_oauth(
                           If provided, SPIRE workload identity will be enabled.
                           If None, SPIRE is disabled (default: None)
     """
-    configure_auth((client_id+"-main-client"), app_name)
+    runtime_client_id = _normalize_runtime_client_id(client_id)
+    timeout_seconds = int(os.getenv("AUTHSEC_TIMEOUT_SECONDS", "15"))
+    retries = int(os.getenv("AUTHSEC_RETRIES", "2"))
+
+    configure_auth(
+        runtime_client_id,
+        app_name,
+        auth_service_url=auth_service_url if auth_service_url else None,
+        services_base_url=services_base_url if services_base_url else None,
+        timeout=timeout_seconds,
+        retries=retries,
+    )
 
     # Store SPIRE socket path in global config if provided
     if spire_socket_path:
@@ -621,7 +920,7 @@ def run_mcp_server_with_oauth(
         _config["spire_enabled"] = False
 
     async def _run():
-        server = MCPServer((client_id+"-main-client"), app_name)
+        server = MCPServer(runtime_client_id, app_name)
         server.set_user_module(user_module)
 
         print(f"Starting {app_name} MCP Server on {host}:{port}")

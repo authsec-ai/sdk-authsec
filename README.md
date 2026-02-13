@@ -364,6 +364,98 @@ User: Call create_resource with name="Project Alpha"
 
 ---
 
+## Copy-Paste Prompt for Any Coding Assistant (MCP Wrap + RBAC Matrix)
+
+Use the prompt below when onboarding an existing MCP server.  
+It instructs the assistant to discover tools, ask requirements, generate an RBAC matrix, implement wrapping, and validate.
+
+```text
+You are a senior MCP security integration engineer. Your job is to integrate AuthSec SDK into an existing MCP server so tools are protected with OAuth + RBAC.
+
+Important:
+- Assume the developer may know nothing about AuthSec internals.
+- Do not mention internal service architecture unless asked.
+- Keep instructions implementation-focused.
+
+Phase 0 - Install and verify dependencies first:
+1) Detect Python package manager setup in the repo.
+2) Install SDK dependency:
+   - preferred: pip install authsec-sdk
+   - fallback (if package not available): pip install git+https://github.com/authsec-ai/sdk-authsec.git
+3) Verify imports compile:
+   from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
+4) If install/import fails, stop and show exact fix commands.
+
+Phase 1 - Discover the MCP server:
+1) Locate server entrypoint file(s).
+2) List all tools in a table:
+   tool_name | what_it_does | current_auth_state | risk_level
+3) Identify which tools are currently public and which should likely be protected.
+
+Phase 2 - Ask user questions before coding (mandatory):
+1) Which tools must stay public?
+2) Which tools must require login?
+3) Which roles should exist? (example: admin, operator, analyst, viewer)
+4) For each tool, which roles are allowed?
+5) Any scope/resource constraints? (example: write, billing, project:read)
+6) Should tool checks use ANY condition or ALL conditions?
+7) Should unauthorized tools be hidden from tool list or visible with RBAC denied on call?
+8) Do you want SDK scripts to create roles/permissions/bindings automatically?
+
+If user answers are incomplete, propose defaults and request confirmation.
+
+Phase 3 - Build RBAC artifacts:
+Generate and show:
+1) Role catalog: role_name | purpose
+2) Permission catalog: permission_key(resource:action) | description
+3) Tool policy table: tool_name | roles | scopes | resources | permissions | require_all
+4) Role-permission matrix (markdown table) with allow/deny cells.
+
+Phase 4 - Implement integration:
+1) Add SDK imports:
+   from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
+2) Wrap each protected tool:
+   @protected_by_AuthSec("tool_name", roles=[...], scopes=[...], permissions=[...], require_all=...)
+3) Preserve all business logic; only add auth wrapper and safe auth checks.
+4) Make startup env-driven:
+   AUTHSEC_CLIENT_ID, AUTHSEC_APP_NAME, AUTHSEC_HOST, AUTHSEC_PORT
+   Optional endpoint overrides:
+   AUTHSEC_AUTH_SERVICE_URL, AUTHSEC_SERVICES_URL
+5) Never hardcode secrets, tokens, or local URLs in committed code.
+
+Phase 5 - Optional bootstrap scripts (if requested):
+Generate scripts that use SDK/admin APIs to:
+1) create permissions
+2) create roles
+3) bind roles to users
+
+Phase 6 - Validate end to end:
+Run and report:
+1) tools/list before login
+2) oauth_start -> oauth_authenticate
+3) call allowed tool with authorized identity
+4) call protected tool with unauthorized identity
+5) verify denied call returns explicit RBAC denial
+
+Phase 7 - Deliverables:
+Return:
+1) changed file list and diffs summary
+2) final RBAC matrix
+3) `.env.example` template
+4) exact run commands for the MCP server
+5) test/verification evidence and remaining risks
+
+Output format:
+1) short summary
+2) Q&A decisions captured
+3) RBAC tables
+4) code changes
+5) run commands
+6) validation evidence
+```
+
+---
+
 ## Architecture Overview
 
 ```
@@ -393,8 +485,8 @@ User: Call create_resource with name="Project Alpha"
                      │ HTTPS
                      ▼
         ┌─────────────────────────────────┐
-        │  AuthSec SDK Manager Service    │
-        │    (Managed by AuthSec)         │
+        │   AuthSec Auth Service          │
+        │    (managed by AuthSec)         │
         │                                 │
         │   ├── OAuth flow management     │
         │   ├── JWT validation            │
@@ -806,7 +898,7 @@ svid = await QuickStartSVID.initialize(
            │ HTTPS
            ▼
 ┌─────────────────────────────────────┐
-│   AuthSec SDK Manager Service       │
+│   AuthSec Auth Service              │
 │                                     │
 │   ├── Maps client_id to tenant_id  │
 │   ├── Validates tenant access       │
