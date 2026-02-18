@@ -24,7 +24,7 @@ class CIBAClient:
     
     Example usage:
         # Initialize for tenant flow
-        from AuthSec_SDK import CIBAClient
+        from authsec_sdk import CIBAClient
         
         client = CIBAClient(client_id="your_tenant_client_id")
         

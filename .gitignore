@@ -1,5 +1,9 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
 
 # macOS
 .DS_Store
@@ -8,3 +12,10 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Node/TypeScript artifacts
+node_modules/
+*.tgz
+
+# Internal local tooling
+.claude/

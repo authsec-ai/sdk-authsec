@@ -1,0 +1,3 @@
+include README.md
+recursive-include src/authsec_sdk/spiffe_workload_api/api *.proto
+global-exclude __pycache__ *.py[cod] .DS_Store

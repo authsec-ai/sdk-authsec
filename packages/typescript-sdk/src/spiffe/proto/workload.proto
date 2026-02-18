@@ -1,0 +1,126 @@
+// SPIFFE Workload API
+// Based on: https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md
+
+syntax = "proto3";
+
+package spiffe.workload;
+
+option go_package = "github.com/spiffe/go-spiffe/v2/proto/spiffe/workload;workload";
+
+// SpiffeWorkloadAPI provides methods for workloads to retrieve their SPIFFE identities
+service SpiffeWorkloadAPI {
+    // Fetch X.509-SVID - Workloads subscribe to this RPC to receive X.509 SVIDs
+    // SVIDs are streamed to the workload and automatically updated before expiry
+    rpc FetchX509SVID(X509SVIDRequest) returns (stream X509SVIDResponse);
+
+    // Fetch X.509 bundles - Returns trust bundles for federated trust domains
+    rpc FetchX509Bundles(X509BundlesRequest) returns (stream X509BundlesResponse);
+
+    // Validate JWT-SVID - Validates a JWT-SVID token
+    rpc ValidateJWTSVID(ValidateJWTSVIDRequest) returns (ValidateJWTSVIDResponse);
+
+    // Fetch JWT-SVID - Fetches a JWT-SVID with specified audience
+    rpc FetchJWTSVID(JWTSVIDRequest) returns (JWTSVIDResponse);
+
+    // Fetch JWT bundles
+    rpc FetchJWTBundles(JWTBundlesRequest) returns (stream JWTBundlesResponse);
+}
+
+// X.509-SVID Request
+message X509SVIDRequest {
+    // Empty - workload is identified by Unix socket peer credentials
+}
+
+// X.509-SVID Response
+message X509SVIDResponse {
+    // List of X.509 SVIDs
+    repeated X509SVID svids = 1;
+
+    // X.509 certificate bundles (trust bundles)
+    // Key is trust domain name (e.g., "example.org")
+    map<string, bytes> crl = 2;
+
+    // Federated bundles (trust bundles for federated trust domains)
+    map<string, bytes> federated_bundles = 3;
+}
+
+// X.509 SVID
+message X509SVID {
+    // SPIFFE ID
+    string spiffe_id = 1;
+
+    // X.509 certificate (PEM encoded)
+    bytes x509_svid = 2;
+
+    // Private key (PEM encoded)
+    bytes x509_svid_key = 3;
+
+    // Certificate bundle (PEM encoded)
+    bytes bundle = 4;
+}
+
+// X.509 Bundles Request
+message X509BundlesRequest {
+    // Empty
+}
+
+// X.509 Bundles Response
+message X509BundlesResponse {
+    // X.509 certificate bundles
+    // Key is trust domain name
+    map<string, bytes> bundles = 1;
+}
+
+// JWT-SVID Request
+message JWTSVIDRequest {
+    // Audience for JWT
+    repeated string audience = 1;
+
+    // SPIFFE ID (optional - defaults to workload's default identity)
+    string spiffe_id = 2;
+}
+
+// JWT-SVID Response
+message JWTSVIDResponse {
+    // List of JWT SVIDs
+    repeated JWTSVID svids = 1;
+}
+
+// JWT SVID
+message JWTSVID {
+    // SPIFFE ID
+    string spiffe_id = 1;
+
+    // JWT token
+    string svid = 2;
+}
+
+// JWT Bundles Request
+message JWTBundlesRequest {
+    // Empty
+}
+
+// JWT Bundles Response
+message JWTBundlesResponse {
+    // JWT bundles (JWKS)
+    // Key is trust domain name
+    map<string, bytes> bundles = 1;
+}
+
+// Validate JWT-SVID Request
+message ValidateJWTSVIDRequest {
+    // JWT token to validate
+    string svid = 1;
+
+    // Expected audience
+    string audience = 2;
+}
+
+// Validate JWT-SVID Response
+message ValidateJWTSVIDResponse {
+    // SPIFFE ID extracted from validated token
+    string spiffe_id = 1;
+
+    // Claims from validated token
+    map<string, string> claims = 2;
+}

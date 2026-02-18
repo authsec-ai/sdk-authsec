@@ -141,7 +141,7 @@ class QuickStartSVID:
     Connects directly to SPIRE agent via gRPC and fetches X.509-SVIDs.
 
     Usage:
-        from AuthSec_SDK import QuickStartSVID
+        from authsec_sdk import QuickStartSVID
 
         # Initialize (fetches SVID from agent)
         svid = await QuickStartSVID.initialize(

@@ -1,6 +1,8 @@
 """
-Your Auth Package - AuthSec team provided library
-Minimal MCP server implementation that delegates to hosted SDK Manager
+AuthSec Python SDK core module.
+
+Provides MCP server integration, OAuth workflows, and protected tool execution
+backed by the hosted AuthSec SDK Manager.
 """
 
 import json

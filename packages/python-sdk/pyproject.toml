@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "authsec-sdk"
+version = "4.0.0"
+description = "AuthSec SDK for MCP auth, services, CIBA, and SPIFFE integration"
+readme = "README.md"
+requires-python = ">=3.10.11"
+authors = [
+  { name = "AuthSec Team", email = "a@authnull.com" }
+]
+dependencies = [
+  "aiohttp>=3.9.0",
+  "fastapi>=0.110.0",
+  "grpcio>=1.60.0",
+  "protobuf>=5.29.0,<6.0.0",
+  "requests>=2.31.0",
+  "uvicorn>=0.27.0"
+]
+keywords = ["authsec", "mcp", "oauth", "rbac", "spiffe", "ciba", "authentication", "authorization"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["authsec_sdk*"]
+
+[tool.setuptools.package-data]
+authsec_sdk = ["spiffe_workload_api/api/*.proto"]

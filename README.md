@@ -6,6 +6,39 @@
 
 ---
 
+## Repository Structure
+
+This repository is organized as a monorepo with professional package boundaries:
+
+- `packages/python-sdk`: Python package (`authsec_sdk`)
+- `packages/typescript-sdk`: TypeScript package (`@authsec/sdk`)
+
+### Local Development
+
+Python SDK:
+
+```bash
+cd packages/python-sdk
+pip install -e .
+```
+
+TypeScript SDK:
+
+```bash
+cd packages/typescript-sdk
+npm install
+npm run build
+```
+
+Memory MCP wrapper example:
+
+```bash
+cd packages/typescript-sdk
+AUTHSEC_CLIENT_ID="<your-client-id>" npm run example:memory
+```
+
+---
+
 ## The Problem: Unprotected AI Tools
 
 If you're building MCP servers for AI assistants like Claude, you've probably encountered this critical issue:
