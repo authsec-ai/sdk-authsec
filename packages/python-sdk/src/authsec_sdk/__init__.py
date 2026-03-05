@@ -14,6 +14,9 @@ from .core import (
 # Import CIBA SDK for voice clients and passwordless authentication
 from .ciba_sdk import CIBAClient
 
+# Import Delegation SDK for AI agent trust delegation
+from .delegation_sdk import DelegationClient, DelegationError, DelegationTokenExpired, DelegationTokenNotFound
+
 # Import standalone SPIFFE Workload API SDK
 from .spiffe_workload_api import QuickStartSVID, WorkloadAPIClient
 
@@ -37,8 +40,13 @@ __all__ = [
     "test_services",
     # CIBA SDK for Voice Clients
     "CIBAClient",
+    # Delegation SDK for AI Agent Trust Delegation
+    "DelegationClient",
+    "DelegationError",
+    "DelegationTokenExpired",
+    "DelegationTokenNotFound",
     # SPIRE Workload Identity (Standalone SDK)
     "QuickStartSVID",
     "WorkloadAPIClient",
-    "WorkloadSVID"
+    "WorkloadSVID",
 ]
