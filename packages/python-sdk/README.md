@@ -1,45 +1,57 @@
 # AuthSec Python SDK (`authsec-sdk`)
 
-Add OAuth + authorization enforcement to MCP tools.
+AuthSec Python SDK covers:
+
+- MCP OAuth + RBAC enforcement
+- Trust delegation for AI agents
+- Hosted service credential access
+- CIBA / passwordless authentication
+- SPIFFE workload identity helpers
 
 ## Install
 
 ```bash
-python3 -m pip install authsec-sdk
+python3 -m pip install -U authsec-sdk
 ```
 
-Import path:
+From this repo during development:
+
+```bash
+python3 -m pip install -e packages/python-sdk
+```
+
+## Import Paths
+
+Canonical package import:
 
 ```python
 from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
 ```
 
-Legacy import path is also supported in this release:
+Trust delegation, top-level import:
+
+```python
+from authsec_sdk import DelegationClient
+```
+
+Trust delegation, direct submodule import:
+
+```python
+from authsec_sdk.delegation_sdk import (
+    DelegationClient,
+    DelegationError,
+    DelegationTokenExpired,
+    DelegationTokenNotFound,
+)
+```
+
+Legacy compatibility shim:
 
 ```python
 from AuthSec_SDK import protected_by_AuthSec, run_mcp_server_with_oauth
 ```
 
-## Trust Delegation SDK
-
-Pull a delegated JWT-SVID for an AI agent and use it for downstream API calls.
-
-```python
-from authsec_sdk import DelegationClient
-
-
-client = DelegationClient(
-    client_id="YOUR_AGENT_CLIENT_ID",
-    userflow_url="https://api.authsec.ai/uflow",
-)
-
-token_info = await client.pull_token()
-
-if client.has_permission("users:read"):
-    users = await client.request_json("GET", "https://api.example.com/users")
-```
-
-## Minimal Integration (your MCP server)
+## MCP Quick Start
 
 ```python
 from authsec_sdk import mcp_tool, protected_by_AuthSec, run_mcp_server_with_oauth
@@ -56,9 +68,9 @@ async def ping(arguments: dict) -> list:
 
 @protected_by_AuthSec(
     tool_name="delete_invoice",
-    permissions=["tool:delete_invoice"],  # optional; remove for auth-only
+    permissions=["tool:delete_invoice"],
     require_all=True,
-    description="Delete invoice",
+    description="Delete invoice by id",
     inputSchema={
         "type": "object",
         "properties": {
@@ -70,7 +82,7 @@ async def ping(arguments: dict) -> list:
 )
 async def delete_invoice(arguments: dict) -> list:
     user = (arguments.get("_user_info") or {}).get("email_id", "unknown")
-    return [{"type": "text", "text": f"Deleted {arguments.get('invoice_id')} by {user}"}]
+    return [{"type": "text", "text": f"Deleted {arguments['invoice_id']} by {user}"}]
 
 
 if __name__ == "__main__":
@@ -85,77 +97,135 @@ if __name__ == "__main__":
     )
 ```
 
-## Run
+## Trust Delegation for Agents
 
-```bash
-python3 server.py
+Use trust delegation when an AI agent should pull a delegated JWT-SVID and gate its own tools from delegated permissions.
+
+```python
+from authsec_sdk import DelegationClient
+
+
+client = DelegationClient(
+    client_id="YOUR_AGENT_CLIENT_ID",
+    userflow_url="https://prod.api.authsec.ai/uflow",
+)
+
+token_info = await client.pull_token()
+
+if client.has_permission("users:read"):
+    result = await client.request_json(
+        "GET",
+        "https://api.example.com/users",
+    )
 ```
 
-Default endpoints (production):
-- Auth API: `https://prod.api.authsec.ai/sdkmgr/mcp-auth`
-- Services API: `https://prod.api.authsec.ai/sdkmgr/services`
+Available delegation surface:
 
-Optional endpoint overrides (self-hosted gateway):
+- `pull_token()`
+- `ensure_token()`
+- `has_permission()`
+- `has_any_permission()`
+- `has_all_permissions()`
+- `request()`
+- `request_json()`
+- `get_auth_header()`
+- `decode_token_claims()`
+- properties: `token`, `permissions`, `spiffe_id`, `is_expired`, `expires_in_seconds`, `client_id`
 
-```bash
-export AUTHSEC_AUTH_SERVICE_URL="http://localhost:8000/sdkmgr/mcp-auth"
-export AUTHSEC_SERVICES_URL="http://localhost:8000/sdkmgr/services"
-python3 server.py
+`request()` returns a buffered `DelegationHTTPResponse` with:
+
+- `status`
+- `headers`
+- `body`
+- `url`
+- `ok`
+- `text()`
+- `json()`
+
+Refresh behavior:
+
+- If the cached token is near expiry, `ensure_token()` re-pulls it automatically.
+- If a downstream request returns `401`, the client refreshes once and retries once.
+
+Error behavior:
+
+- `DelegationTokenNotFound`: no active delegation token for this client
+- `DelegationTokenExpired`: server reports expired delegation
+- `DelegationError`: network, parsing, or generic API failures
+
+## Agent Compatibility Note
+
+The compatibility benchmark for trust delegation is the external example agent at `/Users/pc/Downloads/generic_agent.py`.
+
+This package is compatible with that style of usage:
+
+- direct import from `authsec_sdk.delegation_sdk`
+- permission checks via `has_permission()`
+- token access via `ensure_token()`
+- identity inspection via `decode_token_claims()`
+
+Important:
+
+- The SDK does not require any repo-local `sys.path` hack.
+- A normal `pip install authsec-sdk` is sufficient.
+- If your agent uses OpenAI, `openai` is an application dependency. It is not bundled with this SDK.
+
+## Other Surfaces
+
+Hosted service access:
+
+```python
+from authsec_sdk import ServiceAccessSDK
 ```
 
-## Verify
+CIBA:
 
-```bash
-npx @modelcontextprotocol/inspector http://127.0.0.1:3005
+```python
+from authsec_sdk import CIBAClient
 ```
 
-Flow:
-- Call `oauth_start`
-- Complete login in browser
-- Call your protected tool with `session_id`
+SPIFFE:
 
-For browser auto-open from your local SDK server process:
-
-```bash
-export AUTHSEC_AUTO_OPEN_BROWSER=1
+```python
+from authsec_sdk import QuickStartSVID, WorkloadAPIClient, WorkloadSVID
 ```
+
+## Environment Variables
+
+MCP SDK runtime:
+
+- `AUTHSEC_AUTH_SERVICE_URL`
+- `AUTHSEC_SERVICES_URL`
+- `AUTHSEC_TIMEOUT_SECONDS`
+- `AUTHSEC_RETRIES`
+- `AUTHSEC_TOOLS_LIST_TIMEOUT_SECONDS`
+- `AUTHSEC_OAUTH_TOOL_TIMEOUT_SECONDS`
+
+Typical trust delegation app config:
+
+- `CLIENT_ID`
+- `USERFLOW_URL`
+- `BASE_API_URL`
 
 ## Troubleshooting
 
 - `ModuleNotFoundError: No module named 'authsec_sdk'`
-  - You are using a different Python than the one where you installed the package. Use `python3 -m pip ...` and run with the same `python3`.
+  - Install the package into the same Python interpreter you use to run the app.
 - `ModuleNotFoundError: No module named 'AuthSec_SDK'`
-  - Upgrade to this release (`4.0.4+`) or use canonical import `authsec_sdk`.
-- Server exits with cleanup event-loop error on Ctrl+C
-  - Fixed in this release (`4.0.4+`).
-- `oauth_start` returns `browser_opened: false`
-  - Set `AUTHSEC_AUTO_OPEN_BROWSER=1` or call `oauth_start` with `{"open_browser": true}`.
-- MCP Inspector shows `MCP error -32001: Request timed out`
-  - Reduce upstream wait with `AUTHSEC_OAUTH_TOOL_TIMEOUT_SECONDS` (default `8`).
-  - Example: `export AUTHSEC_OAUTH_TOOL_TIMEOUT_SECONDS=5`
-- OAuth completes in browser but tool calls still unauthorized
-  - Check `callback_url` in `oauth_start` response.
-  - Recommended callback URI is `https://prod.api.authsec.ai/sdkmgr/mcp-auth/callback` (SDK Manager-hosted callback).
-  - Local fallback `http://localhost:3005/oauth/callback` is also supported by this SDK server.
+  - Upgrade to a current release or switch to the canonical `authsec_sdk` import path.
+- `DelegationTokenNotFound`
+  - No delegation exists yet for the agent client. An admin must delegate first.
+- `DelegationTokenExpired`
+  - Pull a fresh delegated token or have an admin renew the delegation.
+- Downstream request fails after refresh
+  - Inspect the downstream API, audience, and delegated permissions. The SDK retries only once after `401`.
 
-## Publishing (maintainer)
-
-1. Set credentials:
-
-```bash
-export TWINE_USERNAME="__token__"
-export TWINE_PASSWORD="pypi-..."
-```
-
-2. Build and upload:
+## Publishing
 
 ```bash
 cd /absolute/path/to/sdk-authsec/packages/python-sdk
 python3 -m pip install --upgrade build twine
 python3 -m build
 python3 -m twine check dist/*
-# Optional TestPyPI:
-# python3 -m twine upload --repository testpypi dist/*
-# Publish:
 python3 -m twine upload dist/*
 ```

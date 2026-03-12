@@ -1,35 +1,14 @@
 # AuthSec TypeScript SDK (`@authsec/sdk`)
 
-Add OAuth + RBAC protection to MCP tools and wrappers in TypeScript/JavaScript.
+AuthSec TypeScript SDK covers:
 
-This SDK lets you:
-- Protect tools with `protectedByAuthSec(...)`
-- Register public tools with `mcpTool(...)`
-- Run an MCP server with `runMcpServerWithOAuth(...)`
-- Wrap another MCP server (for example memory server) and enforce AuthSec in front of it
-
-## What This SDK Does (and Why)
-
-AuthSec is the **control plane**: users authenticate through AuthSec, show up in the AuthSec web app, and you assign roles/permissions and conditional access policies.
-
-This TypeScript package is the **enforcement layer for MCP**:
-- It provides an MCP server runtime and a wrapper pattern so tools run behind an enforcement point.
-- OAuth tools (`oauth_*`) and authorization decisions are delegated upstream to AuthSec SDK Manager.
-- Protected tool calls are enforced at call time (deny means your handler is not executed). Tool hiding in `tools/list` is a UX improvement, not the security boundary.
-
-## Package
-
-- Name: `@authsec/sdk`
-- Node: `>=18`
-- Entry: `dist/index.js`
+- MCP OAuth + RBAC enforcement
+- Trust delegation for AI agents
+- Hosted service credential access
+- CIBA / passwordless authentication
+- SPIFFE workload identity helpers
 
 ## Install
-
-```bash
-cd packages/typescript-sdk
-npm install
-npm run build
-```
 
 Consumer install:
 
@@ -37,226 +16,179 @@ Consumer install:
 npm install @authsec/sdk
 ```
 
-## Quick Start
+From this repo during development:
+
+```bash
+cd packages/typescript-sdk
+npm install
+npm run build
+```
+
+## Core MCP Quick Start
 
 ```ts
 import {
   mcpTool,
   protectedByAuthSec,
   runMcpServerWithOAuth,
-} from "@authsec/sdk";
+} from '@authsec/sdk';
 
 const ping = mcpTool(
   {
-    name: "ping",
-    description: "Health check",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
+    name: 'ping',
+    description: 'Health check',
+    inputSchema: { type: 'object', properties: {}, required: [] },
   },
-  async () => [{ type: "text", text: "pong" }]
+  async () => [{ type: 'text', text: 'pong' }],
 );
 
 const deleteInvoice = protectedByAuthSec(
   {
-    toolName: "delete_invoice",
-    roles: ["admin"],
-    scopes: ["write"],
+    toolName: 'delete_invoice',
+    permissions: ['tool:delete_invoice'],
     requireAll: true,
-    description: "Delete invoice by id",
+    description: 'Delete invoice by id',
     inputSchema: {
-      type: "object",
+      type: 'object',
       properties: {
-        invoice_id: { type: "string" },
-        session_id: { type: "string" },
+        invoice_id: { type: 'string' },
+        session_id: { type: 'string' },
       },
-      required: ["invoice_id"],
+      required: ['invoice_id'],
     },
   },
-  async (args) => {
-    const user = args?._user_info?.email_id ?? "unknown-user";
-    return [{ type: "text", text: `Deleted ${args.invoice_id} by ${user}` }];
-  }
+  async (args) => [{ type: 'text', text: `Deleted ${args.invoice_id}` }],
 );
 
 runMcpServerWithOAuth({
   tools: [ping, deleteInvoice],
   clientId: process.env.AUTHSEC_CLIENT_ID!,
-  appName: "my-ts-mcp",
-  host: "127.0.0.1",
+  appName: 'my-ts-mcp',
+  host: '127.0.0.1',
   port: 3005,
 });
 ```
 
-Run:
+## Trust Delegation for Agents
 
-```bash
-AUTHSEC_CLIENT_ID="YOUR_CLIENT_ID" \
-AUTHSEC_AUTH_SERVICE_URL="https://dev.api.authsec.dev/sdkmgr/mcp-auth" \
-AUTHSEC_SERVICES_URL="https://dev.api.authsec.dev/sdkmgr/services" \
-node <your-compiled-server-entry>.js
+Use trust delegation when an agent should pull a delegated JWT-SVID and expose only the capabilities that delegation allows.
+
+```ts
+import { DelegationClient } from '@authsec/sdk';
+
+const client = new DelegationClient({
+  clientId: process.env.AUTHSEC_CLIENT_ID!,
+  userflowUrl: process.env.AUTHSEC_USERFLOW_URL ?? 'https://prod.api.authsec.ai/uflow',
+});
+
+const tokenInfo = await client.pullToken();
+
+if (client.hasPermission('users:read')) {
+  const result = await client.requestJson('GET', 'https://api.example.com/users');
+  console.log(result);
+}
 ```
 
-## Wrapping an Existing MCP Server (Memory Example)
+Delegation exports:
 
-This repo includes a ready wrapper:
+- `DelegationClient`
+- `DelegationError`
+- `DelegationTokenExpired`
+- `DelegationTokenNotFound`
+- `DelegationHTTPResponse`
+
+Delegation client surface:
+
+- constructor options: `clientId`, `userflowUrl`, `autoRefresh`, `refreshBufferSeconds`, `timeoutMs`
+- getters: `token`, `permissions`, `spiffeId`, `isExpired`, `expiresInSeconds`
+- methods: `pullToken()`, `ensureToken()`, `hasPermission()`, `hasAnyPermission()`, `hasAllPermissions()`, `request()`, `requestJson()`, `getAuthHeader()`, `decodeTokenClaims()`
+
+`request()` returns a buffered `DelegationHTTPResponse`, not a live `fetch` response.
+
+Refresh behavior:
+
+- `ensureToken()` refreshes near-expiry tokens
+- downstream `401` triggers one refresh and one retry
+
+Example runner:
+
+```bash
+cd packages/typescript-sdk
+npm run build
+AUTHSEC_CLIENT_ID="YOUR_AGENT_CLIENT_ID" \
+AUTHSEC_USERFLOW_URL="https://prod.api.authsec.ai/uflow" \
+npm run example:delegation
+```
+
+## Existing Example Wrapper
+
+The repo also includes an MCP wrapper example:
 
 - `packages/typescript-sdk/examples/memory-authsec-wrapper.mjs`
 
-It:
-- Connects to upstream memory MCP server over stdio
-- Reads upstream tool list
-- Wraps each tool with `protectedByAuthSec(...)`
-- Exposes a new AuthSec-protected MCP server on `HOST:PORT`
-
-### Run locally
+Run locally:
 
 ```bash
 cd packages/typescript-sdk
 npm install
 npm run build
-
-AUTHSEC_CLIENT_ID="YOUR_CLIENT_ID" \
-PORT=3005 \
-HOST=127.0.0.1 \
-node examples/memory-authsec-wrapper.mjs
+AUTHSEC_CLIENT_ID="YOUR_CLIENT_ID" node examples/memory-authsec-wrapper.mjs
 ```
 
-### Optional wrapper env vars
+## Other Surfaces
 
-- `AUTHSEC_APP_NAME` (default: autogenerated)
-- `MEMORY_SERVER_COMMAND` (default: `npx`)
-- `MEMORY_SERVER_ARGS_JSON` (default: `["-y","@modelcontextprotocol/server-memory"]`)
-- `AUTHSEC_TOOL_ROLES_JSON` (per-tool RBAC map)
-- `MEMORY_FILE_PATH` (memory server persistence path)
+Hosted service access:
 
-Example RBAC map:
-
-```bash
-AUTHSEC_TOOL_ROLES_JSON='{"create_entities":["admin"],"delete_entities":["admin"]}'
+```ts
+import { ServiceAccessSDK } from '@authsec/sdk';
 ```
 
-## How Protection Works
+CIBA:
 
-1. `tools/list` asks SDK Manager for OAuth + protected tool visibility.
-2. `oauth_*` tools are delegated upstream to SDK Manager.
-3. Protected tool call triggers upstream `protect-tool` check.
-4. On success, handler receives:
-- `args.session_id` (resolved session)
-- `args._user_info` (claims)
+```ts
+import { CIBAClient } from '@authsec/sdk';
+```
 
-Auth behavior note:
-- OAuth/auth decisions are delegated upstream to SDK Manager.
-- Keep local wrappers as thin transport/proxy layers; do not add local auth bypass logic in production.
+SPIFFE:
+
+```ts
+import { QuickStartSVID, WorkloadAPIClient, WorkloadSVID } from '@authsec/sdk';
+```
 
 ## Environment Variables
 
-SDK runtime:
-- `AUTHSEC_AUTH_SERVICE_URL` (default dev URL)
-- `AUTHSEC_SERVICES_URL` (default dev URL)
-- `AUTHSEC_TIMEOUT_SECONDS` (default `15`)
-- `AUTHSEC_RETRIES` (default `2`)
-- `AUTHSEC_TOOLS_LIST_TIMEOUT_SECONDS` (default `8`)
+MCP SDK runtime:
 
-Server runtime:
-- `AUTHSEC_CLIENT_ID` (required by your app wrapper)
-- `AUTHSEC_APP_NAME` (optional app name)
-- `HOST` / `PORT`
+- `AUTHSEC_AUTH_SERVICE_URL`
+- `AUTHSEC_SERVICES_URL`
+- `AUTHSEC_TIMEOUT_SECONDS`
+- `AUTHSEC_RETRIES`
+- `AUTHSEC_TOOLS_LIST_TIMEOUT_SECONDS`
 
-Note:
-- Tool filtering policy for hidden/visible protected tools is controlled in SDK Manager service configuration.
+Common app config:
 
-## Troubleshooting
+- `AUTHSEC_CLIENT_ID`
+- `AUTHSEC_APP_NAME`
+- `AUTHSEC_USERFLOW_URL`
+- `HOST`
+- `PORT`
 
-- `MODULE_NOT_FOUND` when running example path
-  - Check exact file path and avoid trailing spaces in command.
-- `OAuth tool failed: ... released back to the pool`
-  - SDK Manager backend deployment issue, not wrapper syntax.
-- `verifyToken failed: 404`
-  - SDK Manager `AUTH_MANAGER_URL` is likely wrong for environment; ensure dev/prod endpoint is correct.
-- Tools visible but calls denied
-  - Expected when server is configured to expose all tools and enforce RBAC at call-time.
-
-## Prompt Template (Copy/Paste)
-
-Use this prompt with any coding LLM to secure an MCP server with `@authsec/sdk`:
-
-```text
-You are editing a TypeScript MCP server codebase.
-
-Goal:
-1) Add @authsec/sdk to protect sensitive tools with OAuth + RBAC.
-2) Keep selected tools unprotected.
-3) Ensure all auth checks are delegated upstream to SDK Manager (no local auth bypasses).
-
-Requirements:
-- Use protectedByAuthSec(...) for sensitive tools.
-- Use mcpTool(...) for public tools.
-- Provide strict inputSchema for every tool.
-- Run server via runMcpServerWithOAuth({ tools, clientId, appName, host, port }).
-- Add startup instructions with AUTHSEC_CLIENT_ID, AUTHSEC_AUTH_SERVICE_URL, AUTHSEC_SERVICES_URL.
-- If wrapping an upstream MCP server, preserve upstream tool names and normalize returned content.
-
-Inputs:
-- clientId: <YOUR_CLIENT_ID>
-- appName: <YOUR_APP_NAME>
-- protected tools + RBAC:
-  - <tool_1>: roles=[...], scopes=[...], requireAll=<true/false>
-  - <tool_2>: ...
-- unprotected tools:
-  - <tool_3>
-
-Deliverables:
-- Updated TS source files.
-- Run commands.
-- MCP Inspector verification checklist.
-```
-
-## Publishing (npm)
-
-### 1) Bump version
-
-Update version consistently:
-- `packages/typescript-sdk/package.json` -> `version`
-- `packages/typescript-sdk/src/index.ts` -> `VERSION`
-
-### 2) Build and pack
+## Testing
 
 ```bash
 cd packages/typescript-sdk
-npm ci
+npm test
+```
+
+This runs the TypeScript build and the trust delegation tests.
+
+## Publishing
+
+```bash
+cd /absolute/path/to/sdk-authsec/packages/typescript-sdk
+npm install
 npm run clean
 npm run build
 npm pack
-```
-
-### 3) Smoke test tarball (recommended)
-
-```bash
-mkdir -p /tmp/authsec-sdk-smoke && cd /tmp/authsec-sdk-smoke
-npm init -y
-npm install /absolute/path/to/packages/typescript-sdk/authsec-sdk-<version>.tgz
-```
-
-### 4) Publish
-
-```bash
-cd /absolute/path/to/packages/typescript-sdk
-npm login
 npm publish --access public
-```
-
-If using private registry, set it before publish:
-
-```bash
-npm config set registry <your-registry-url>
-npm publish
-```
-
-### 5) Post-publish check
-
-```bash
-npm view @authsec/sdk version
 ```

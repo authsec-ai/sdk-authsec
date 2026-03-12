@@ -96,6 +96,10 @@ class DelegationClient:
     ):
         self.client_id = client_id.strip()
         self.userflow_url = userflow_url.rstrip("/")
+        if not self.client_id:
+            raise DelegationError("client_id must be a non-empty string")
+        if not self.userflow_url:
+            raise DelegationError("userflow_url must be a non-empty string")
         self.auto_refresh = auto_refresh
         self.refresh_buffer_seconds = refresh_buffer_seconds
         self.timeout = timeout
@@ -225,6 +229,8 @@ class DelegationClient:
         """
         if self._needs_refresh():
             await self.pull_token()
+        if not self._token:
+            raise DelegationError("Delegation token is unavailable after refresh")
         return self._token
 
     def has_permission(self, permission: str) -> bool:
@@ -275,6 +281,8 @@ class DelegationClient:
         if response.status == 401 and self.auto_refresh:
             logger.info("Got 401, refreshing delegation token...")
             await self.pull_token()
+            if not self._token:
+                raise DelegationError("Delegation token refresh returned no token")
             req_headers["Authorization"] = f"Bearer {self._token}"
             response = await self._request_once(method, url, req_headers, json_body=json_body, **kwargs)
 
@@ -298,7 +306,12 @@ class DelegationClient:
             json_body=json_body,
             **kwargs,
         )
-        parsed = response.json()
+        try:
+            parsed = response.json()
+        except Exception as e:
+            raise DelegationError(
+                f"Expected JSON object response from {response.url}: {str(e)}"
+            ) from e
         if parsed is None:
             return {}
         if not isinstance(parsed, dict):
@@ -359,18 +372,21 @@ class DelegationClient:
         **kwargs,
     ) -> DelegationHTTPResponse:
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(
-                method,
-                url,
-                headers=headers,
-                json=json_body,
-                **kwargs,
-            ) as resp:
-                body = await resp.read()
-                return DelegationHTTPResponse(
-                    status=resp.status,
-                    headers=dict(resp.headers),
-                    body=body,
-                    url=str(resp.url),
-                )
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=json_body,
+                    **kwargs,
+                ) as resp:
+                    body = await resp.read()
+                    return DelegationHTTPResponse(
+                        status=resp.status,
+                        headers=dict(resp.headers),
+                        body=body,
+                        url=str(resp.url),
+                    )
+        except aiohttp.ClientError as e:
+            raise DelegationError(f"Network error calling delegated endpoint {url}: {e}") from e

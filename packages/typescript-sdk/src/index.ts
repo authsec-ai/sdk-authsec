@@ -12,6 +12,7 @@
  *   runMcpServerWithOAuth,
  *   ServiceAccessSDK,
  *   CIBAClient,
+ *   DelegationClient,
  * } from '@authsec/sdk';
  *
  * const adminTool = protectedByAuthSec({
@@ -49,6 +50,20 @@ export { ServiceAccessSDK, ServiceAccessError } from './service-access.js';
 // CIBA Passwordless Auth
 export { CIBAClient } from './ciba.js';
 
+// Trust Delegation
+export {
+  DelegationClient,
+  DelegationError,
+  DelegationHTTPResponse,
+  DelegationTokenExpired,
+  DelegationTokenNotFound,
+} from './delegation.js';
+export type {
+  DelegationClientOptions,
+  DelegationRequestOptions,
+  DelegationTokenInfo,
+} from './delegation.js';
+
 // SPIFFE Workload Identity
 export { QuickStartSVID } from './spiffe/quick-start-svid.js';
 export { WorkloadAPIClient } from './spiffe/workload-api-client.js';
@@ -68,4 +83,4 @@ export type {
 } from './types.js';
 export { SimpleSession } from './types.js';
 
-export const VERSION = '4.0.0';
+export const VERSION = '4.1.0';

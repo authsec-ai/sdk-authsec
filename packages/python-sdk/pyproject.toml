@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "authsec-sdk"
-version = "4.0.5"
+version = "4.1.0"
 description = "AuthSec SDK for MCP auth, services, CIBA, and SPIFFE integration"
 readme = "README.md"
 requires-python = ">=3.10.11"
@@ -19,7 +19,7 @@ dependencies = [
   "requests>=2.31.0",
   "uvicorn>=0.27.0"
 ]
-keywords = ["authsec", "mcp", "oauth", "rbac", "spiffe", "ciba", "authentication", "authorization"]
+keywords = ["authsec", "mcp", "oauth", "rbac", "delegation", "spiffe", "ciba", "authentication", "authorization"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

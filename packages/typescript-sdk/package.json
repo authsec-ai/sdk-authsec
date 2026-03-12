@@ -1,6 +1,6 @@
 {
   "name": "@authsec/sdk",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "AuthSec SDK for MCP Auth, Services, CIBA, and SPIFFE integration (TypeScript/JavaScript)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,6 +11,8 @@
   "scripts": {
     "build": "tsc && mkdir -p dist/spiffe/proto && cp src/spiffe/proto/workload.proto dist/spiffe/proto/",
     "clean": "rm -rf dist",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "example:delegation": "node examples/delegation-client.mjs",
     "example:memory": "node examples/memory-authsec-wrapper.mjs",
     "prepublishOnly": "npm run clean && npm run build"
   },
@@ -19,6 +21,7 @@
     "mcp",
     "oauth",
     "rbac",
+    "delegation",
     "spiffe",
     "ciba",
     "authentication",
