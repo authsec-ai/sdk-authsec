@@ -15,11 +15,56 @@ This repository is organized as a monorepo with professional package boundaries:
 
 ### Local Development
 
+Install (consumers):
+
+Python (PyPI):
+
+macOS / Linux:
+
+```bash
+python3 -m pip install -U authsec-sdk
+```
+
+Windows PowerShell:
+
+```powershell
+py -3 -m pip install -U authsec-sdk
+```
+
+TypeScript (npm):
+
+```bash
+npm install @authsec/sdk
+```
+
+From GitHub monorepo (advanced, Python):
+
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install "git+https://github.com/authsec-ai/sdk-authsec.git@main#subdirectory=packages/python-sdk"
+```
+
+Windows PowerShell:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+py -3 -m pip install --upgrade pip
+py -3 -m pip install "git+https://github.com/authsec-ai/sdk-authsec.git@main#subdirectory=packages/python-sdk"
+```
+
+See `packages/python-sdk/README.md` for full OS-specific install, run, and troubleshooting steps.
+
+Repo contributor setup:
+
 Python SDK:
 
 ```bash
-cd packages/python-sdk
-pip install -e .
+python3 -m pip install -e packages/python-sdk
 ```
 
 TypeScript SDK:
@@ -35,6 +80,19 @@ Memory MCP wrapper example:
 ```bash
 cd packages/typescript-sdk
 AUTHSEC_CLIENT_ID="<your-client-id>" npm run example:memory
+```
+
+### Publishing (Python)
+
+```bash
+cd packages/python-sdk
+python3 -m pip install --upgrade build twine
+python3 -m build
+python3 -m twine check dist/*
+# Optional dry run on TestPyPI:
+# python3 -m twine upload --repository testpypi dist/*
+# Publish:
+python3 -m twine upload dist/*
 ```
 
 ---
@@ -64,10 +122,29 @@ from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
 async def admin_tool(arguments: dict) -> list:
     return [{"type": "text", "text": "Welcome to admin panel!"}]
 
-run_mcp_server_with_oauth(client_id="your-client-id", app_name="My Server")
+if __name__ == "__main__":
+    import __main__
+
+    run_mcp_server_with_oauth(
+        user_module=__main__,
+        client_id="your-client-id",
+        app_name="My Server",
+    )
 ```
 
 That's it. Your tool is now protected by OAuth 2.0 and RBAC.
+
+### What AuthSec Does (and Why There’s a Server Wrapper)
+
+AuthSec is the **control plane**:
+- Users authenticate through AuthSec (SSO/IdP lives outside your MCP server).
+- Users show up in the AuthSec web app, where you assign roles/permissions and conditional access policies.
+- AuthSec becomes the source of truth for who can see/call which MCP tools.
+
+The SDK is the **enforcement layer**:
+- It provides a minimal MCP server runtime (or wrapper) so your tools run behind an enforcement point.
+- OAuth tools (`oauth_*`) and authorization decisions are delegated upstream to AuthSec SDK Manager.
+- Protected tool calls are enforced at call time (deny means your handler is not executed). Tool hiding in `tools/list` is a UX improvement, not the security boundary.
 
 ---
 
@@ -110,17 +187,14 @@ After authentication, the user receives a JWT token containing:
 
 They call `oauth_authenticate` with this token.
 
-### Step 4: RBAC Magic - Validating Permissions
+### Step 4: Authorization (RBAC + Conditional Access)
 
-Here's where AuthSec SDK does the heavy lifting. For **each tool** in your server, it:
+AuthSec is the source of truth for authorization:
 
-1. Connects to your tenant database (`tenant_acme-corp`)
-2. Validates JWT claims against database:
-   - Does `admin` role exist in `roles` table? ✓
-   - Does `write` scope exist in `scopes` table? ✓
-   - Does `analytics` resource exist in `resources` table? ✓
-3. Checks if user satisfies tool requirements
-4. Returns list of accessible tools
+1. After a user logs in, they appear in the AuthSec web app.
+2. You assign roles/permissions (and optional conditional access policies) to the user.
+3. When a protected tool is called, the SDK asks AuthSec whether the session is allowed to call that tool right now.
+4. If denied, the SDK returns an error and your business handler is not executed.
 
 **Example validation**:
 
@@ -314,8 +388,10 @@ async def sensitive_operations(arguments: dict) -> list:
 ### 1. Install the SDK
 
 ```bash
-pip install git+https://github.com/authsec-ai/sdk-authsec.git
+python3 -m pip install authsec-sdk
 ```
+
+If you can’t use PyPI, prefer the macOS one-command bootstrap (or see `packages/python-sdk/README.md` for GitHub/Windows install options).
 
 ### 2. Get Your Client Credentials
 
@@ -355,7 +431,10 @@ async def create_resource(arguments: dict) -> list:
 
 # Start the server
 if __name__ == "__main__":
+    import __main__
+
     run_mcp_server_with_oauth(
+        user_module=__main__,
         client_id="your-client-id-here",
         app_name="My Secure MCP Server"
     )
@@ -414,7 +493,7 @@ Phase 0 - Install and verify dependencies first:
 1) Detect Python package manager setup in the repo.
 2) Install SDK dependency:
    - preferred: pip install authsec-sdk
-   - fallback (if package not available): pip install git+https://github.com/authsec-ai/sdk-authsec.git
+   - fallback: follow `packages/python-sdk/README.md` (GitHub monorepo install commands)
 3) Verify imports compile:
    from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
 4) If install/import fails, stop and show exact fix commands.
@@ -523,7 +602,7 @@ Output format:
         │                                 │
         │   ├── OAuth flow management     │
         │   ├── JWT validation            │
-        │   ├── RBAC checking             │
+        │   ├── RBAC + policy decisions   │
         │   ├── Session management        │
         │   └── Vault integration         │
         └────────────┬────────────────────┘
@@ -531,20 +610,14 @@ Output format:
                      ▼
         ┌─────────────────────────────────┐
         │      External Services          │
-        │  ├── OAuth Provider             │
-        │  ├── HashiCorp Vault            │
-        │  └── Tenant Database            │
+        │  ├── Your IdP (Okta/AzureAD)    │
+        │  └── Secrets store (optional)   │
         └─────────────────────────────────┘
 ```
 
-### Multi-Tenant Architecture
+### Multi-Tenant
 
-- **Master Database**: Tenant mappings
-- **Tenant Databases**: Each tenant has isolated database (`tenant_{tenant_id}`)
-  - RBAC tables (roles, scopes, resources, permissions)
-  - Authenticated sessions
-  - Service configurations
-  - User data
+AuthSec is multi-tenant by design: users, roles/permissions, conditional access policies, sessions, and service integrations are configured per tenant in the AuthSec web app. Your MCP server does not need to run (or manage) a tenant database to use RBAC.
 
 ---
 
@@ -614,7 +687,7 @@ async def admin_dashboard(arguments: dict, session) -> list:
 - Role-Based Access Control (RBAC)
 - Dynamic tool filtering (users only see permitted tools)
 - Flexible permissions: roles, groups, scopes, resources
-- Database-backed validation (not just JWT claims)
+- Central policy evaluation in AuthSec (configured in the web app)
 - AND/OR logic support
 
 ### 🔑 External Service Integration
@@ -645,7 +718,7 @@ A: They simply re-authenticate by calling `oauth_start` again. The entire proces
 A: Absolutely! AuthSec SDK works with any OAuth 2.0 provider (Google, GitHub, Custom Logon, etc.).
 
 **Q: How does RBAC validation actually work?**
-A: User roles/scopes from JWT are validated against your tenant database. Access is granted only if they exist in both places.
+A: You assign users roles/permissions in the AuthSec web app. On every protected tool call, the SDK asks AuthSec whether the session is allowed to call that tool (and returns user context). Tool hiding in `tools/list` improves UX; allow/deny on `tools/call` is the security boundary.
 
 **Q: Are credentials really secure?**
 A: Yes. Credentials are stored in HashiCorp Vault, never in your code. They're fetched on-demand and never exposed to end users.
@@ -1034,7 +1107,7 @@ That's it. Your tools are now protected by enterprise-grade security.
 Building secure AI tools shouldn't be complicated. With AuthSec SDK, you get:
 
 - ✅ OAuth 2.0 authentication in 3 lines of code
-- ✅ Flexible RBAC with database validation
+- ✅ Flexible RBAC and conditional access enforced by AuthSec
 - ✅ Secure credential management with Vault
 - ✅ Dynamic tool filtering based on permissions
 - ✅ Multi-tenant architecture out of the box

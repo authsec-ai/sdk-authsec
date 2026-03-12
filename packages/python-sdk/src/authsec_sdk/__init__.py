@@ -23,7 +23,7 @@ try:
 except ImportError:
     WorkloadSVID = None
 
-__version__ = "4.0.0"
+__version__ = "4.0.4"
 __all__ = [
     # MCP Auth & Services
     "protected_by_AuthSec",
@@ -40,5 +40,6 @@ __all__ = [
     # SPIRE Workload Identity (Standalone SDK)
     "QuickStartSVID",
     "WorkloadAPIClient",
-    "WorkloadSVID"
+    "WorkloadSVID",
+    "mcp_tool",
 ]

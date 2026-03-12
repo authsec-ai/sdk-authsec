@@ -11,16 +11,18 @@ import urllib.parse
 import aiohttp
 import asyncio
 import inspect
-import sys
 import uvicorn
-import signal
 from typing import Dict, Optional, List, Callable, Any
 from functools import wraps
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import dataclass
 import logging
+import html
+import webbrowser
+import subprocess
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +30,8 @@ logger = logging.getLogger(__name__)
 _config = {
     "client_id": None,
     "app_name": None,
-    "auth_service_url": "https://dev.api.authsec.dev/sdkmgr/mcp-auth",
-    "services_base_url": "https://dev.api.authsec.dev/sdkmgr/services",
+    "auth_service_url": "https://prod.api.authsec.ai/sdkmgr/mcp-auth",
+    "services_base_url": "https://prod.api.authsec.ai/sdkmgr/services",
     "timeout": 10,
     "retries": 3
 }
@@ -313,6 +315,104 @@ def _normalize_oauth_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     return args
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _open_url_in_local_browser(url: str) -> bool:
+    # Try Python's default browser dispatch first.
+    try:
+        if webbrowser.open(url, new=2):
+            return True
+    except Exception:
+        pass
+
+    # Fallback OS launchers (best-effort, non-blocking).
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        if os.name == "nt":
+            os.startfile(url)  # type: ignore[attr-defined]
+            return True
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
+def _parse_first_content_json(tool_response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(tool_response, dict):
+        return None
+    content = tool_response.get("content")
+    if not isinstance(content, list) or not content:
+        # Some upstream variants may return payload directly.
+        if "authorization_url" in tool_response and isinstance(tool_response.get("authorization_url"), str):
+            return tool_response
+        return None
+    first = content[0]
+    if not isinstance(first, dict):
+        return None
+
+    # MCP text payload already decoded to object by upstream/middleware.
+    text = first.get("text")
+    if isinstance(text, dict):
+        return text
+
+    # Non-standard payload variant where first content item is already the JSON object.
+    if "authorization_url" in first and isinstance(first.get("authorization_url"), str):
+        return first
+
+    text = first.get("text")
+    if not isinstance(text, str):
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _update_first_content_json(tool_response: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    content = tool_response.get("content")
+    if not isinstance(content, list) or not content:
+        if isinstance(tool_response, dict) and "authorization_url" in tool_response:
+            tool_response.update(payload)
+        return tool_response
+    first = content[0]
+    if not isinstance(first, dict):
+        return tool_response
+
+    if isinstance(first.get("text"), dict):
+        first["text"] = payload
+        return tool_response
+
+    if isinstance(first.get("text"), str):
+        first["text"] = json.dumps(payload, indent=2)
+        return tool_response
+
+    if "authorization_url" in first:
+        first.update(payload)
+        return tool_response
+
+    return tool_response
+
 def mcp_tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
@@ -376,9 +476,9 @@ def protected_by_AuthSec(
 
     RBAC Validation:
         - If no RBAC parameters are provided, only authentication is required
-        - If RBAC parameters are provided, they are validated against tenant_{tenant_id} database
-        - RBAC check happens during oauth_authenticate tool execution
-        - Only tools that satisfy RBAC conditions are exposed/unprotected
+        - If RBAC parameters are provided, AuthSec can use them to filter tool visibility (tools/list)
+        - RBAC is also enforced at tool execution time using the resolved session/user claims
+        - Tool hiding is a UX improvement; allow/deny at tools/call is the security boundary
 
     Examples:
         @protected_by_AuthSec("admin_tool", roles=["admin"])
@@ -528,9 +628,8 @@ class MCPServer:
         self._setup_shutdown_handlers()
 
     def _setup_shutdown_handlers(self):
-        """Setup handlers to clean up sessions on server shutdown"""
-        async def cleanup_sessions():
-            """Clean up all active sessions for this client"""
+        """Register lifecycle hooks to clean up sessions on server shutdown."""
+        async def cleanup_sessions_on_shutdown():
             try:
                 cleanup_result = await _make_auth_request(
                     "cleanup-sessions",
@@ -544,21 +643,9 @@ class MCPServer:
             except Exception as e:
                 print(f"Session cleanup failed: {e}")
 
-        # Handle SIGINT (Ctrl+C) and SIGTERM
-        def signal_handler(signum, frame):
-            print(f"\nReceived signal {signum}, cleaning up sessions...")
-            try:
-                # Run cleanup synchronously on shutdown
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(cleanup_sessions())
-                loop.close()
-            except Exception as e:
-                print(f"Cleanup error: {e}")
-            sys.exit(0)
-
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
+        @self.app.on_event("shutdown")
+        async def _on_shutdown():
+            await cleanup_sessions_on_shutdown()
 
     def set_user_module(self, module):
         """
@@ -681,6 +768,94 @@ class MCPServer:
                     "id": None,
                     "error": {"code": -32603, "message": str(e)}
                 })
+
+        @self.app.get("/oauth/callback", response_class=HTMLResponse)
+        async def oauth_callback_page(
+            code: str,
+            state: str,
+            session_id: Optional[str] = None,
+            client_id: Optional[str] = None,
+        ):
+            """
+            OAuth callback endpoint for local SDK servers.
+            Proxies callback completion to AuthSec auth service, then renders a browser-friendly page.
+            """
+            callback_payload: Dict[str, Any] = {
+                "code": code,
+                "state": state,
+                "client_id": client_id or self.client_id,
+            }
+            if session_id:
+                callback_payload["session_id"] = session_id
+
+            result = await _make_auth_request("callback", callback_payload)
+            if not isinstance(result, dict):
+                result = {"error": "invalid_callback_response", "detail": str(result)}
+
+            # Detect callback failure from upstream payload shape.
+            status = str(result.get("status", ""))
+            has_error = bool(result.get("error") or result.get("detail"))
+            if has_error and status != "authenticated":
+                error_text = html.escape(str(result.get("detail") or result.get("error") or "OAuth callback failed"))
+                return HTMLResponse(
+                    f"""
+                    <html>
+                      <body style="font-family: sans-serif; padding: 24px;">
+                        <h2>Authentication Failed</h2>
+                        <p>{error_text}</p>
+                        <p>Return to MCP client and retry <code>oauth_start</code>.</p>
+                      </body>
+                    </html>
+                    """,
+                    status_code=400,
+                )
+
+            sid = html.escape(str(result.get("session_id", session_id or "unknown")))
+            target_url = result.get("post_auth_redirect_url")
+            if target_url:
+                sep = "&" if "?" in str(target_url) else "?"
+                target_url = f"{target_url}{sep}authsec_status=authenticated&authsec_session_id={urllib.parse.quote(str(result.get('session_id', session_id or '')))}"
+            escaped_target = html.escape(str(target_url or ""))
+
+            return HTMLResponse(
+                f"""
+                <html>
+                  <body style="font-family: sans-serif; padding: 24px;">
+                    <h2>Authentication Successful</h2>
+                    <p>Your OAuth session is authenticated.</p>
+                    <p><b>Session ID:</b> <code>{sid}</code></p>
+                    <p id="next-step">Returning to your client...</p>
+                    <script>
+                      (function() {{
+                        const payload = {{ type: "authsec_oauth_complete", session_id: "{sid}", status: "authenticated" }};
+                        try {{ localStorage.setItem("authsec_oauth_result", JSON.stringify(payload)); }} catch (e) {{}}
+                        try {{
+                          if (window.opener && !window.opener.closed) {{
+                            window.opener.postMessage(payload, "*");
+                          }}
+                        }} catch (e) {{}}
+
+                        const target = "{escaped_target}";
+                        if (target) {{
+                          document.getElementById("next-step").innerText = "Authentication complete. Redirecting back to your client...";
+                          setTimeout(function () {{
+                            window.location.replace(target);
+                          }}, 700);
+                          return;
+                        }}
+
+                        document.getElementById("next-step").innerText = "Authentication complete. You can close this tab and return to your client.";
+                        if (window.opener && !window.opener.closed) {{
+                          setTimeout(function () {{
+                            window.close();
+                          }}, 1200);
+                        }}
+                      }})();
+                    </script>
+                  </body>
+                </html>
+                """
+            )
 
     def _oauth_tools_fallback(self) -> List[Dict[str, Any]]:
         """Local fallback OAuth tools if auth service tools/list is unavailable."""
@@ -834,18 +1009,48 @@ class MCPServer:
             if tool_name.startswith("oauth_"):
                 # Delegate OAuth tools to hosted service
                 arguments = _normalize_oauth_arguments(arguments)
+                if tool_name == "oauth_start" and "open_browser" not in arguments:
+                    arguments["open_browser"] = _env_flag("AUTHSEC_AUTO_OPEN_BROWSER", default=False)
                 if tool_name == "oauth_start" and isinstance(arguments, dict) and "return_url" not in arguments and request is not None:
                     auto_return_url = self._derive_return_url(request)
                     if auto_return_url:
                         arguments["return_url"] = auto_return_url
-                tool_response = await _make_auth_request(
-                    f"tools/call/{tool_name}",
-                    {
-                        "client_id": self.client_id,
-                        "app_name": self.app_name,
-                        "arguments": arguments
+                oauth_tool_timeout = float(os.getenv("AUTHSEC_OAUTH_TOOL_TIMEOUT_SECONDS", "8"))
+                try:
+                    tool_response = await asyncio.wait_for(
+                        _make_auth_request(
+                            f"tools/call/{tool_name}",
+                            {
+                                "client_id": self.client_id,
+                                "app_name": self.app_name,
+                                "arguments": arguments
+                            }
+                        ),
+                        timeout=oauth_tool_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    tool_response = {
+                        "error": "oauth tool call timed out against auth service",
+                        "tool": tool_name,
+                        "message": (
+                            f"Timed out after {oauth_tool_timeout}s calling "
+                            f"{_config['auth_service_url']}/tools/call/{tool_name}"
+                        ),
                     }
-                )
+                if tool_name == "oauth_start" and _coerce_bool(arguments.get("open_browser"), default=False):
+                    parsed = _parse_first_content_json(tool_response)
+                    auth_url = str(parsed.get("authorization_url", "")) if parsed else ""
+                    if auth_url and not bool(parsed.get("browser_opened")):
+                        try:
+                            browser_opened = await asyncio.to_thread(_open_url_in_local_browser, auth_url)
+                            parsed["browser_opened"] = bool(browser_opened)
+                            if browser_opened:
+                                parsed["browser_opened_by"] = "sdk_local_fallback"
+                            tool_response = _update_first_content_json(tool_response, parsed)
+                        except Exception as browser_err:
+                            parsed.setdefault("warnings", [])
+                            parsed["warnings"].append(f"sdk_local_browser_open_failed: {str(browser_err)}")
+                            tool_response = _update_first_content_json(tool_response, parsed)
                 if isinstance(tool_response, dict) and isinstance(tool_response.get("content"), list):
                     content = tool_response["content"]
                 else:
@@ -941,7 +1146,10 @@ def run_mcp_server_with_oauth(
         uvicorn_server = uvicorn.Server(config)
         await uvicorn_server.serve()
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        print("Server interrupted. Shutdown complete.")
 
 # Utility functions
 def get_config() -> Dict[str, Any]:
