@@ -23,6 +23,11 @@ from authsec_sdk import (
     test_auth_service,
     test_services,
     CIBAClient,
+    DelegationClient,
+    DelegationError,
+    DelegationHTTPResponse,
+    DelegationTokenExpired,
+    DelegationTokenNotFound,
     QuickStartSVID,
     WorkloadAPIClient,
     WorkloadSVID,
@@ -33,6 +38,7 @@ from authsec_sdk import (
 __path__ = []  # type: ignore
 sys.modules.setdefault("AuthSec_SDK.AuthSec_SDK", importlib.import_module("authsec_sdk.core"))
 sys.modules.setdefault("AuthSec_SDK.ciba_sdk", importlib.import_module("authsec_sdk.ciba_sdk"))
+sys.modules.setdefault("AuthSec_SDK.delegation_sdk", importlib.import_module("authsec_sdk.delegation_sdk"))
 sys.modules.setdefault("AuthSec_SDK.spire_sdk", importlib.import_module("authsec_sdk.spire_sdk"))
 sys.modules.setdefault("AuthSec_SDK.spiffe_workload_api", importlib.import_module("authsec_sdk.spiffe_workload_api"))
 sys.modules.setdefault(
@@ -60,8 +66,12 @@ __all__ = [
     "test_auth_service",
     "test_services",
     "CIBAClient",
+    "DelegationClient",
+    "DelegationError",
+    "DelegationHTTPResponse",
+    "DelegationTokenExpired",
+    "DelegationTokenNotFound",
     "QuickStartSVID",
     "WorkloadAPIClient",
     "WorkloadSVID",
 ]
-

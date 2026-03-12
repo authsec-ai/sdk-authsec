@@ -20,6 +20,25 @@ Legacy import path is also supported in this release:
 from AuthSec_SDK import protected_by_AuthSec, run_mcp_server_with_oauth
 ```
 
+## Trust Delegation SDK
+
+Pull a delegated JWT-SVID for an AI agent and use it for downstream API calls.
+
+```python
+from authsec_sdk import DelegationClient
+
+
+client = DelegationClient(
+    client_id="YOUR_AGENT_CLIENT_ID",
+    userflow_url="https://api.authsec.ai/uflow",
+)
+
+token_info = await client.pull_token()
+
+if client.has_permission("users:read"):
+    users = await client.request_json("GET", "https://api.example.com/users")
+```
+
 ## Minimal Integration (your MCP server)
 
 ```python
