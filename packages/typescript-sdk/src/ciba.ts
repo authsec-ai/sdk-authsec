@@ -36,14 +36,14 @@ export class CIBAClient {
     let payload: Record<string, any>;
 
     if (this.clientId) {
-      endpoint = `${this.baseUrl}/uflow/auth/tenant/ciba/initiate`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/tenant/ciba/initiate`;
       payload = {
         client_id: this.clientId,
         email,
         binding_message: 'Authentication requested via Voice SDK',
       };
     } else {
-      endpoint = `${this.baseUrl}/uflow/auth/ciba/initiate`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/ciba/initiate`;
       payload = {
         login_hint: email,
         binding_message: 'Authentication requested via Voice SDK',
@@ -77,14 +77,14 @@ export class CIBAClient {
     let payload: Record<string, any>;
 
     if (this.clientId) {
-      endpoint = `${this.baseUrl}/uflow/auth/tenant/totp/login`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/tenant/totp/login`;
       payload = { client_id: this.clientId, email, totp_code: code };
     } else {
       // Admin flow (fallback to dev.api if base_url is localhost for compatibility)
       if (this.baseUrl.includes('localhost') || this.baseUrl.includes('127.0.0.1')) {
-        endpoint = 'https://dev.api.authsec.dev/uflow/auth/totp/login';
+        endpoint = 'https://dev.api.authsec.dev/authsec/uflow/auth/totp/login';
       } else {
-        endpoint = `${this.baseUrl}/uflow/auth/totp/login`;
+        endpoint = `${this.baseUrl}/authsec/uflow/auth/totp/login`;
       }
       payload = { email, totp_code: code };
     }
@@ -140,10 +140,10 @@ export class CIBAClient {
     let payload: Record<string, any>;
 
     if (this.clientId) {
-      endpoint = `${this.baseUrl}/uflow/auth/tenant/ciba/token`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/tenant/ciba/token`;
       payload = { client_id: this.clientId, auth_req_id: authReqId };
     } else {
-      endpoint = `${this.baseUrl}/uflow/auth/ciba/token`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/ciba/token`;
       payload = { auth_req_id: authReqId };
     }
 

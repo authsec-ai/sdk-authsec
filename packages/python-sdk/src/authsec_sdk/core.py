@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 _config = {
     "client_id": None,
     "app_name": None,
-    "auth_service_url": "https://dev.api.authsec.dev/sdkmgr/mcp-auth",
-    "services_base_url": "https://dev.api.authsec.dev/sdkmgr/services",
+    "auth_service_url": "https://dev.api.authsec.dev/authsec/sdkmgr/mcp-auth",
+    "services_base_url": "https://dev.api.authsec.dev/authsec/sdkmgr/services",
     "timeout": 10,
     "retries": 3
 }

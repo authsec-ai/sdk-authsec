@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AuthSec Python SDK — Integration Test Results</title>
+<style>
+  :root { --bg: #0f172a; --card: #1e293b; --text: #e2e8f0; --border: #334155; --accent: #3b82f6; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: #94a3b8; margin-bottom: 24px; font-size: 14px; }
+  .banner { background: #22c55e; color: white; padding: 18px 24px; border-radius: 12px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; }
+  .banner .big { font-size: 28px; font-weight: 800; }
+  .stats { display: flex; gap: 32px; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 24px; font-weight: 700; }
+  .stat .lbl { font-size: 11px; text-transform: uppercase; opacity: 0.85; }
+  .suite { background: var(--card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+  .suite-header { padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
+  .suite-name { font-weight: 600; font-size: 15px; }
+  .suite-badge { color: white; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  thead { background: rgba(0,0,0,0.2); }
+  th { text-align: left; padding: 8px 16px; font-size: 11px; text-transform: uppercase; color: #94a3b8; font-weight: 600; }
+  td { padding: 10px 16px; font-size: 14px; border-top: 1px solid var(--border); }
+  .dur { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #94a3b8; }
+  .error-msg { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #f87171; word-break: break-all; }
+  .row-pass td:first-child { color: #22c55e; }
+  .row-fail { background: rgba(239,68,68,0.06); }
+  .row-error { background: rgba(245,158,11,0.06); }
+  .footer { text-align: center; color: #64748b; font-size: 12px; margin-top: 32px; }
+  .sdk-badges { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+  .sdk-badge { background: var(--card); border: 1px solid var(--border); padding: 6px 14px; border-radius: 8px; font-size: 13px; }
+  .sdk-badge b { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>AuthSec Python SDK — Integration Tests</h1>
+  <p class="subtitle">All Python SDKs tested against authsec service at http://localhost:7468</p>
+
+  <div class="sdk-badges">
+    <span class="sdk-badge"><b>core</b> — configure_auth, MCPServer, ServiceAccessSDK, protected_by_AuthSec</span>
+    <span class="sdk-badge"><b>ciba_sdk</b> — CIBAClient (CIBA + TOTP)</span>
+    <span class="sdk-badge"><b>delegation_sdk</b> — DelegationClient</span>
+    <span class="sdk-badge"><b>spire_sdk</b> — WorkloadSVID, QuickStartSVID</span>
+  </div>
+
+  <div class="banner">
+    <div>
+      <div class="big">ALL TESTS PASSED</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="num">61</div><div class="lbl">Total</div></div>
+      <div class="stat"><div class="num" style="color:#bbf7d0">61</div><div class="lbl">Passed</div></div>
+      <div class="stat"><div class="num" style="color:#fca5a5">0</div><div class="lbl">Failed</div></div>
+      <div class="stat"><div class="num" style="color:#fde68a">0</div><div class="lbl">Errors</div></div>
+      <div class="stat"><div class="num">206</div><div class="lbl">ms Total</div></div>
+    </div>
+  </div>
+
+  
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">1. SDK Configuration</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Config Sets Values</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Config Urls</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Config Rejects Empty Client Id</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Config Rejects Empty App Name</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">2. Client ID Normalization</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Normalize Base Uuid</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Normalize Already Suffixed</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Normalize Underscores</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Normalize Empty Raises</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">3. Health Checks</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Auth Service Health</td>
+                <td class="dur">9 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Services Health</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Auth Health Raw</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Services Health Raw</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">4. MCP Auth Flow</span>
+                <span class="suite-badge" style="background:#22c55e">6/6</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Start Auth Session</td>
+                <td class="dur">5 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Tools List</td>
+                <td class="dur">4 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Sessions Status</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Protect Tool Denied</td>
+                <td class="dur">6 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Cleanup Sessions</td>
+                <td class="dur">6 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Logout Session</td>
+                <td class="dur">14 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">5. Services API</span>
+                <span class="suite-badge" style="background:#22c55e">2/2</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Credentials Requires Session</td>
+                <td class="dur">4 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>User Details Requires Session</td>
+                <td class="dur">8 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">6. ServiceAccessSDK</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Sdk Init With Dict</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Sdk Rejects Bad Session</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Sdk Health Check</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Sdk Get Credentials No Session</td>
+                <td class="dur">7 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">7. MCPServer</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Mcpserver Init</td>
+                <td class="dur">1 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Mcpserver Initialize</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Mcpserver Tools List</td>
+                <td class="dur">5 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Mcpserver Unknown Method</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">8. CIBA Client</span>
+                <span class="suite-badge" style="background:#22c55e">5/5</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Ciba Init Default</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Ciba Init Custom Url</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Ciba Init Client Id</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Ciba Cancel Resets</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Ciba Verify Totp Max Retries</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">9. Delegation Client</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Delegation Client Init</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Delegation Client Expired</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Delegation Client Permissions</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Delegation Pull Token Not Found</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">10. OAuth Tools (MCP)</span>
+                <span class="suite-badge" style="background:#22c55e">2/2</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Oauth Start Via Mcp</td>
+                <td class="dur">11 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Unknown Tool Via Mcp</td>
+                <td class="dur">0 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">11. Backward Compatibility</span>
+                <span class="suite-badge" style="background:#22c55e">3/3</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Old Path Auth Health</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Old Path Services Health</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Sdk With Old Urls</td>
+                <td class="dur">4 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">12. E2E Auth Lifecycle</span>
+                <span class="suite-badge" style="background:#22c55e">1/1</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Full Lifecycle</td>
+                <td class="dur">46 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">13. JWT Authentication</span>
+                <span class="suite-badge" style="background:#22c55e">6/6</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Jwt Dashboard Statistics</td>
+                <td class="dur">5 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Jwt Dashboard Admin Users</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Jwt Dev Server Status</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Jwt Rejected Without Token</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Jwt Expired Rejected</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Jwt Wrong Secret Rejected</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">14. SPIRE / Workload Identity</span>
+                <span class="suite-badge" style="background:#22c55e">3/3</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Spire Health</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Spire Workload Initialize</td>
+                <td class="dur">5 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Spire Workload Status</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">15. Playground / MCP OAuth</span>
+                <span class="suite-badge" style="background:#22c55e">4/4</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Playground Oauth Check Requirements</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Playground Conversations List</td>
+                <td class="dur">3 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Playground Create Conversation</td>
+                <td class="dur">7 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Playground Health</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">16. Voice Client</span>
+                <span class="suite-badge" style="background:#22c55e">2/2</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Voice Interact</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Voice Poll</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+            <div class="suite">
+              <div class="suite-header">
+                <span class="suite-name">17. Dashboard</span>
+                <span class="suite-badge" style="background:#22c55e">3/3</span>
+              </div>
+              <table><thead><tr>
+                <th width="40"></th><th>Test</th><th width="100">Duration</th><th>Details</th>
+              </tr></thead><tbody>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Dashboard Sessions</td>
+                <td class="dur">6 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Dashboard Users</td>
+                <td class="dur">2 ms</td>
+                <td></td>
+              </tr>
+              <tr class="row-pass">
+                <td style="color:#22c55e;font-size:18px;text-align:center">&#10004;</td>
+                <td>Dashboard Health</td>
+                <td class="dur">4 ms</td>
+                <td></td>
+              </tr></tbody></table></div>
+
+  <div class="footer">
+    AuthSec SDK v4.0.0 &middot; Python &middot; Generated 2026-03-12 15:50:38
+  </div>
+</div>
+</body>
+</html>

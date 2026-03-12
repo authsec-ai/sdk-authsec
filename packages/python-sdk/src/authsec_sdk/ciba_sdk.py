@@ -74,7 +74,7 @@ class CIBAClient:
 
         if self.client_id:
             # Tenant/End-User flow
-            endpoint = f"{self.base_url}/uflow/auth/tenant/ciba/initiate"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/initiate"
             payload = {
                 "client_id": self.client_id,
                 "email": email,
@@ -82,7 +82,7 @@ class CIBAClient:
             }
         else:
             # Admin flow
-            endpoint = f"{self.base_url}/uflow/auth/ciba/initiate"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/ciba/initiate"
             payload = {"login_hint": email, "binding_message": "Authentication requested via Voice SDK"}
         
         response = requests.post(endpoint, json=payload)
@@ -109,14 +109,14 @@ class CIBAClient:
 
         if self.client_id:
             # Tenant/End-User flow
-            endpoint = f"{self.base_url}/uflow/auth/tenant/totp/login"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/totp/login"
             payload = {"client_id": self.client_id, "email": email, "totp_code": code}
         else:
             # Admin flow (fallback to dev.api if base_url is localhost for compatibility)
             if "localhost" in self.base_url or "127.0.0.1" in self.base_url:
-                endpoint = "https://dev.api.authsec.dev/uflow/auth/totp/login"
+                endpoint = "https://dev.api.authsec.dev/authsec/uflow/auth/totp/login"
             else:
-                endpoint = f"{self.base_url}/uflow/auth/totp/login"
+                endpoint = f"{self.base_url}/authsec/uflow/auth/totp/login"
             payload = {"email": email, "totp_code": code}
         
         try:
@@ -155,11 +155,11 @@ class CIBAClient:
         
         if self.client_id:
             # Tenant/End-User flow
-            endpoint = f"{self.base_url}/uflow/auth/tenant/ciba/token"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/token"
             payload = {"client_id": self.client_id, "auth_req_id": auth_req_id}
         else:
             # Admin flow
-            endpoint = f"{self.base_url}/uflow/auth/ciba/token"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/ciba/token"
             payload = {"auth_req_id": auth_req_id}
         
         start_time = time.time()

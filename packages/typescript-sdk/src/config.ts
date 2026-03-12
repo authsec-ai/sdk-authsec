@@ -8,8 +8,8 @@ import type { AuthSecConfig } from './types.js';
 const _config: AuthSecConfig = {
   clientId: null,
   appName: null,
-  authServiceUrl: 'https://dev.api.authsec.dev/sdkmgr/mcp-auth',
-  servicesBaseUrl: 'https://dev.api.authsec.dev/sdkmgr/services',
+  authServiceUrl: 'https://dev.api.authsec.dev/authsec/sdkmgr/mcp-auth',
+  servicesBaseUrl: 'https://dev.api.authsec.dev/authsec/sdkmgr/services',
   timeout: 10,
   retries: 3,
   spireSocketPath: null,

@@ -6,7 +6,7 @@ Usage:
 
     client = DelegationClient(
         client_id="abc-123-...",
-        userflow_url="https://api.authsec.ai/uflow",
+        userflow_url="https://api.authsec.ai/authsec/uflow",
     )
 
     # Pull token (admin must have delegated first)
@@ -58,7 +58,7 @@ class DelegationClient:
 
     Args:
         client_id: The AI agent's client UUID (from clients-microservice)
-        userflow_url: Base URL of the user-flow service (e.g. https://api.authsec.ai/uflow)
+        userflow_url: Base URL of the user-flow service (e.g. https://api.authsec.ai/authsec/uflow)
         auto_refresh: Automatically re-pull token when it nears expiry (default: True)
         refresh_buffer_seconds: Re-pull when token expires within this many seconds (default: 300)
         timeout: HTTP timeout in seconds (default: 10)
