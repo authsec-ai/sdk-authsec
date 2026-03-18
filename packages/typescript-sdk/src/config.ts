@@ -18,6 +18,21 @@ const _config: AuthSecConfig = {
 
 /** In-memory session cache for user info (best-effort, used for oauth_user_info) */
 export const sessionUserInfo: Record<string, any> = {};
+let currentSessionId: string | null = null;
+
+export function getCurrentSessionId(): string | null {
+  return currentSessionId;
+}
+
+export function setCurrentSessionId(sessionId: string | null | undefined): void {
+  currentSessionId = sessionId ? String(sessionId) : null;
+}
+
+export function clearCurrentSessionId(sessionId?: string | null): void {
+  if (!sessionId || currentSessionId === String(sessionId)) {
+    currentSessionId = null;
+  }
+}
 
 /**
  * Normalize caller-provided clientId to the runtime form expected by SDK Manager.

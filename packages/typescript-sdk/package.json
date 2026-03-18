@@ -12,6 +12,7 @@
     "build": "tsc && mkdir -p dist/spiffe/proto && cp src/spiffe/proto/workload.proto dist/spiffe/proto/",
     "clean": "rm -rf dist",
     "example:memory": "node examples/memory-authsec-wrapper.mjs",
+    "example:memory:local": "npm run build && npm run example:memory",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [

@@ -4,6 +4,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { protectedByAuthSec, runMcpServerWithOAuth } from "../dist/index.js";
 
+const DEFAULT_AUTH_SERVICE_URL =
+  "http://localhost:7468/authsec/sdkmgr/mcp-auth";
+const DEFAULT_SERVICES_URL =
+  "http://localhost:7468/authsec/sdkmgr/services";
+
 function parseJsonEnv(name, fallback) {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -38,6 +43,15 @@ async function main() {
   if (!clientId) {
     throw new Error("Set AUTHSEC_CLIENT_ID before running");
   }
+
+  const host = process.env.HOST ?? "127.0.0.1";
+  const port = Number(process.env.PORT ?? "3005");
+  const appName =
+    process.env.AUTHSEC_APP_NAME ?? `authsec-memory-wrapper-${Date.now()}`;
+  const authServiceUrl =
+    process.env.AUTHSEC_AUTH_SERVICE_URL ?? DEFAULT_AUTH_SERVICE_URL;
+  const servicesUrl =
+    process.env.AUTHSEC_SERVICES_URL ?? DEFAULT_SERVICES_URL;
 
   const memoryCommand = process.env.MEMORY_SERVER_COMMAND ?? "npx";
   const memoryArgs = parseJsonEnv("MEMORY_SERVER_ARGS_JSON", [
@@ -84,16 +98,31 @@ async function main() {
     )
   );
 
-  const appName =
-    process.env.AUTHSEC_APP_NAME ?? `authsec-memory-wrapper-${Date.now()}`;
+  console.log("[AuthSec] Local MCP smoke test configuration");
+  console.log("[AuthSec] SDK source: local dist build (../dist/index.js)");
   console.log(`[AuthSec] appName: ${appName}`);
+  console.log(`[AuthSec] host: ${host}`);
+  console.log(`[AuthSec] port: ${port}`);
+  console.log(
+    `[AuthSec] auth service: ${authServiceUrl} (${
+      process.env.AUTHSEC_AUTH_SERVICE_URL ? "env override" : "sdk default"
+    })`
+  );
+  console.log(
+    `[AuthSec] services URL: ${servicesUrl} (${
+      process.env.AUTHSEC_SERVICES_URL ? "env override" : "sdk default"
+    })`
+  );
+  console.log(
+    `[AuthSec] upstream memory server: ${memoryCommand} ${memoryArgs.join(" ")}`
+  );
 
   runMcpServerWithOAuth({
     tools: wrappedTools,
     clientId,
     appName,
-    host: process.env.HOST ?? "127.0.0.1",
-    port: Number(process.env.PORT ?? "3005"),
+    host,
+    port,
   });
 }
 

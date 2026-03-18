@@ -34,8 +34,15 @@ Memory MCP wrapper example:
 
 ```bash
 cd packages/typescript-sdk
-AUTHSEC_CLIENT_ID="<your-client-id>" npm run example:memory
+cp examples/memory-authsec-wrapper.env.example examples/memory-authsec-wrapper.env
+# fill in AUTHSEC_CLIENT_ID
+set -a
+source examples/memory-authsec-wrapper.env
+set +a
+npm run example:memory:local
 ```
+
+See [`packages/typescript-sdk/README.md`](packages/typescript-sdk/README.md) for the full local SDK smoke-test flow and MCP Inspector steps.
 
 ---
 

@@ -14,6 +14,7 @@ import inspect
 import sys
 import uvicorn
 import signal
+import webbrowser
 from typing import Dict, Optional, List, Callable, Any
 from functools import wraps
 from fastapi import FastAPI, Request
@@ -37,6 +38,7 @@ _config = {
 
 # In-memory session cache for user info (best-effort, used for oauth_user_info)
 _session_user_info: Dict[str, Any] = {}
+_current_session_id: Optional[str] = None
 
 
 def _decode_jwt_unverified(token: str) -> Dict[str, Any]:
@@ -53,6 +55,54 @@ def _decode_jwt_unverified(token: str) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _set_current_session_id(session_id: Optional[str]) -> None:
+    global _current_session_id
+    if session_id:
+        _current_session_id = str(session_id)
+
+
+def _clear_current_session_id(session_id: Optional[str] = None) -> None:
+    global _current_session_id
+    if session_id is None or _current_session_id == str(session_id):
+        _current_session_id = None
+
+
+def _extract_content_payload(content: Any) -> Dict[str, Any]:
+    if not isinstance(content, list):
+        return {}
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+            try:
+                parsed = json.loads(item["text"])
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+    return {}
+
+
+def _update_current_session_from_oauth_result(tool_name: str, content: Any) -> None:
+    payload = _extract_content_payload(content)
+    if not payload or payload.get("error"):
+        return
+
+    session_id = payload.get("session_id")
+    if tool_name in {"oauth_start", "oauth_authenticate"} and session_id:
+        _set_current_session_id(session_id)
+        return
+
+    if tool_name == "oauth_status":
+        status = payload.get("status")
+        if status == "authenticated" and session_id:
+            _set_current_session_id(session_id)
+        elif status in {"expired", "not_found", "logged_out"}:
+            _clear_current_session_id(session_id)
+        return
+
+    if tool_name == "oauth_logout":
+        _clear_current_session_id(session_id)
 
 def _normalize_runtime_client_id(client_id: str) -> str:
     """
@@ -313,6 +363,45 @@ def _normalize_oauth_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     return args
 
+
+def _should_open_browser(arguments: Any) -> bool:
+    if not isinstance(arguments, dict):
+        return False
+    value = arguments.get("open_browser")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _try_open_browser_from_content(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        try:
+            payload = json.loads(text)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        authorization_url = payload.get("authorization_url")
+        if not isinstance(authorization_url, str) or not authorization_url.strip():
+            continue
+        try:
+            opened = bool(webbrowser.open(authorization_url, new=2))
+        except Exception:
+            opened = False
+        payload["browser_opened"] = opened
+        item["text"] = json.dumps(payload, indent=2)
+        return opened
+    return False
+
 def mcp_tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
@@ -409,7 +498,9 @@ def protected_by_AuthSec(
         @wraps(func)
         async def wrapper(arguments: dict) -> list:
             # Extract session ID from arguments
-            session_id = arguments.get("session_id")
+            session_id = arguments.get("session_id") or _current_session_id
+            if session_id and "session_id" not in arguments:
+                arguments["session_id"] = session_id
 
             # Single API call to auth service for tool protection
             payload = {
@@ -791,6 +882,7 @@ class MCPServer:
                         {
                             "client_id": self.client_id,
                             "app_name": self.app_name,
+                            "session_id": _current_session_id,
                             "user_tools": self.user_tools  # Protected tools with RBAC metadata
                         }
                     ),
@@ -848,6 +940,9 @@ class MCPServer:
                 )
                 if isinstance(tool_response, dict) and isinstance(tool_response.get("content"), list):
                     content = tool_response["content"]
+                    _update_current_session_from_oauth_result(tool_name, content)
+                    if tool_name == "oauth_start" and _should_open_browser(arguments):
+                        _try_open_browser_from_content(content)
                 else:
                     # Preserve useful upstream diagnostics instead of collapsing to a generic error.
                     error_payload = {

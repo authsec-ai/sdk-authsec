@@ -5,11 +5,15 @@
 
 import express from 'express';
 import cors from 'cors';
+import { spawn } from 'node:child_process';
 import { makeAuthRequest } from './http.js';
 import {
+  clearCurrentSessionId,
   configureAuth,
+  getCurrentSessionId,
   getInternalConfig,
   normalizeRuntimeClientId,
+  setCurrentSessionId,
 } from './config.js';
 import type { ToolDefinition, McpMessage } from './types.js';
 
@@ -160,6 +164,108 @@ class MCPServer {
     return args;
   }
 
+  private shouldOpenBrowser(arguments_: Record<string, any>): boolean {
+    const value = arguments_?.open_browser;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+    }
+    return false;
+  }
+
+  private openBrowser(url: string): boolean {
+    try {
+      let command: string;
+      let args: string[];
+
+      if (process.platform === 'darwin') {
+        command = 'open';
+        args = [url];
+      } else if (process.platform === 'win32') {
+        command = 'cmd';
+        args = ['/c', 'start', '', url];
+      } else {
+        command = 'xdg-open';
+        args = [url];
+      }
+
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private maybeOpenBrowserFromContent(
+    content: Array<Record<string, any>>
+  ): boolean {
+    for (const item of content) {
+      if (typeof item?.text !== 'string') continue;
+      try {
+        const payload = JSON.parse(item.text);
+        if (
+          typeof payload === 'object' &&
+          payload !== null &&
+          typeof payload.authorization_url === 'string' &&
+          payload.authorization_url
+        ) {
+          const opened = this.openBrowser(payload.authorization_url);
+          payload.browser_opened = opened;
+          item.text = JSON.stringify(payload, null, 2);
+          return opened;
+        }
+      } catch {
+        // ignore non-JSON text payloads
+      }
+    }
+    return false;
+  }
+
+  private updateCurrentSessionFromOauthContent(
+    toolName: string,
+    content: Array<Record<string, any>>
+  ): void {
+    for (const item of content) {
+      if (item?.type !== 'text' || typeof item.text !== 'string') continue;
+      try {
+        const payload = JSON.parse(item.text);
+        if (!payload || typeof payload !== 'object' || payload.error) return;
+
+        const sessionId =
+          typeof payload.session_id === 'string' ? payload.session_id : null;
+
+        if ((toolName === 'oauth_start' || toolName === 'oauth_authenticate') && sessionId) {
+          setCurrentSessionId(sessionId);
+          return;
+        }
+
+        if (toolName === 'oauth_status') {
+          if (payload.status === 'authenticated' && sessionId) {
+            setCurrentSessionId(sessionId);
+          } else if (
+            payload.status === 'expired' ||
+            payload.status === 'not_found' ||
+            payload.status === 'logged_out'
+          ) {
+            clearCurrentSessionId(sessionId);
+          }
+          return;
+        }
+
+        if (toolName === 'oauth_logout') {
+          clearCurrentSessionId(sessionId);
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+  }
+
   private async processMcpMessage(
     message: McpMessage,
     req: express.Request
@@ -193,6 +299,7 @@ class MCPServer {
           makeAuthRequest('tools/list', {
             client_id: this.clientId,
             app_name: this.appName,
+            session_id: getCurrentSessionId(),
             user_tools: this.userTools,
           }),
           new Promise<Record<string, any>>((_, reject) =>
@@ -264,6 +371,15 @@ class MCPServer {
           Array.isArray(toolResponse.content)
         ) {
           content = toolResponse.content;
+          this.updateCurrentSessionFromOauthContent(toolName, content);
+          if (
+            toolName === 'oauth_start' &&
+            typeof arguments_ === 'object' &&
+            arguments_ !== null &&
+            this.shouldOpenBrowser(arguments_)
+          ) {
+            this.maybeOpenBrowserFromContent(content);
+          }
         } else {
           // Preserve useful upstream diagnostics
           const errorPayload: Record<string, any> = {
@@ -280,6 +396,14 @@ class MCPServer {
           content = [{ type: 'text', text: JSON.stringify(errorPayload) }];
         }
       } else if (this.toolHandlers.has(toolName)) {
+        if (
+          typeof arguments_ === 'object' &&
+          arguments_ !== null &&
+          !arguments_.session_id &&
+          getCurrentSessionId()
+        ) {
+          arguments_.session_id = getCurrentSessionId();
+        }
         // Execute user's tool locally
         content = await this.toolHandlers.get(toolName)!(arguments_);
       } else {

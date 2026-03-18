@@ -5,7 +5,11 @@
 
 import { makeAuthRequest } from './http.js';
 import { evaluateRbac } from './rbac.js';
-import { getInternalConfig, sessionUserInfo } from './config.js';
+import {
+  getCurrentSessionId,
+  getInternalConfig,
+  sessionUserInfo,
+} from './config.js';
 import type {
   ToolDefinition,
   ToolHandler,
@@ -64,7 +68,10 @@ export function protectedByAuthSec(
     arguments_: Record<string, any>
   ): Promise<McpContent[]> => {
     const config = getInternalConfig();
-    const sessionId = arguments_.session_id;
+    const sessionId = arguments_.session_id ?? getCurrentSessionId();
+    if (sessionId && !arguments_.session_id) {
+      arguments_.session_id = sessionId;
+    }
 
     // Single API call to auth service for tool protection
     const payload = {
