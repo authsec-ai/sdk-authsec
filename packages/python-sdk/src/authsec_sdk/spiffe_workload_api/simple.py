@@ -235,6 +235,43 @@ class QuickStartSVID:
             raise RuntimeError("Call QuickStartSVID.initialize() first")
         return cls._instance
 
+    async def validate_jwt_svid(self, token: str, audience: str) -> Optional[dict]:
+        """
+        Validate a JWT-SVID via the agent's gRPC Workload API.
+
+        The agent forwards the validation request to the ICP service —
+        workloads never need to know the ICP service URL.
+
+        Args:
+            token: JWT-SVID token string to validate
+            audience: Expected audience claim
+
+        Returns:
+            Dict with 'spiffe_id' and 'claims' if valid, None if invalid
+
+        Example:
+            result = await svid.validate_jwt_svid(token, audience="authsec-api")
+            if result:
+                print(f"Caller: {result['spiffe_id']}")
+        """
+        return await self.client.validate_jwt_svid(token, audience)
+
+    async def fetch_jwt_svid(self, audience: list, spiffe_id: Optional[str] = None) -> Optional[str]:
+        """
+        Fetch a JWT-SVID from the agent.
+
+        Args:
+            audience: List of audience strings for the JWT
+            spiffe_id: Optional SPIFFE ID (defaults to workload's own identity)
+
+        Returns:
+            JWT token string, or None on failure
+
+        Example:
+            token = await svid.fetch_jwt_svid(audience=["authsec-api"])
+        """
+        return await self.client.fetch_jwt_svid(audience, spiffe_id)
+
     def get_certificate_dict(self) -> dict:
         """
         Get certificate data as dict for easy passing to HTTP clients.

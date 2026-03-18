@@ -100,72 +100,10 @@ class WorkloadAPIClient:
             if not self.stub:
                 await self.connect()
 
-            # Create request
             request = workload_pb2.X509SVIDRequest()
+            metadata = self._build_metadata()
 
-            # For TCP sockets, send PID in gRPC metadata
-            # (Unix sockets use SO_PEERCRED instead)
-            metadata = []
-            if self.socket_path.startswith("tcp://"):
-                pid = os.getpid()
-                metadata.append(('x-pid', str(pid)))
-                self.logger.debug(f"Sending PID {pid} in gRPC metadata")
-
-            # Send Kubernetes metadata if available (for cross-pod attestation)
-            k8s_namespace = os.getenv('POD_NAMESPACE')
-            k8s_pod_name = os.getenv('POD_NAME')
-            k8s_pod_uid = os.getenv('POD_UID')
-            k8s_service_account = os.getenv('SERVICE_ACCOUNT')
-            k8s_pod_label_app = os.getenv('POD_LABEL_APP')
-
-            if k8s_namespace:
-                metadata.append(('x-k8s-namespace', k8s_namespace))
-                self.logger.debug(f"Sending K8s namespace: {k8s_namespace}")
-            if k8s_pod_name:
-                metadata.append(('x-k8s-pod-name', k8s_pod_name))
-                self.logger.debug(f"Sending K8s pod name: {k8s_pod_name}")
-            if k8s_pod_uid:
-                metadata.append(('x-k8s-pod-uid', k8s_pod_uid))
-                self.logger.debug(f"Sending K8s pod UID: {k8s_pod_uid}")
-            if k8s_service_account:
-                metadata.append(('x-k8s-service-account', k8s_service_account))
-                self.logger.debug(f"Sending K8s service account: {k8s_service_account}")
-            if k8s_pod_label_app:
-                metadata.append(('x-k8s-pod-label-app', k8s_pod_label_app))
-                self.logger.debug(f"Sending K8s pod label app: {k8s_pod_label_app}")
-
-            # Send Docker metadata if available (for Docker workload attestation)
-            # These can be set as environment variables in docker-compose
-            docker_container_id = os.getenv('DOCKER_CONTAINER_ID')
-            docker_container_name = os.getenv('DOCKER_CONTAINER_NAME')
-            docker_image_name = os.getenv('DOCKER_IMAGE_NAME')
-
-            if docker_container_id:
-                metadata.append(('x-docker-container-id', docker_container_id))
-                self.logger.debug(f"Sending Docker container ID: {docker_container_id}")
-            if docker_container_name:
-                metadata.append(('x-docker-container-name', docker_container_name))
-                self.logger.debug(f"Sending Docker container name: {docker_container_name}")
-            if docker_image_name:
-                metadata.append(('x-docker-image-name', docker_image_name))
-                self.logger.debug(f"Sending Docker image name: {docker_image_name}")
-
-            # Send Docker labels as metadata (prefixed with DOCKER_LABEL_)
-            for key, value in os.environ.items():
-                if key.startswith('DOCKER_LABEL_'):
-                    label_name = key[13:].lower()  # Remove 'DOCKER_LABEL_' prefix
-                    metadata.append((f'x-docker-label-{label_name}', value))
-                    self.logger.debug(f"Sending Docker label {label_name}: {value}")
-
-            # DEBUG: Print metadata being sent
-            print(f"[SDK DEBUG] Metadata being sent to agent: {metadata}", flush=True)
-            print(f"[SDK DEBUG] Metadata tuple: {tuple(metadata)}", flush=True)
-
-            # Call FetchX509SVID - get first response from stream
-            # Convert metadata list to tuple for gRPC
             stream = self.stub.FetchX509SVID(request, metadata=tuple(metadata))
-
-            # Get first response
             response = await stream.read()
 
             if response and len(response.svids) > 0:
@@ -178,9 +116,6 @@ class WorkloadAPIClient:
 
                 self.logger.info("✓ Fetched X.509-SVID")
                 self.logger.info(f"  SPIFFE ID: {self.spiffe_id}")
-                self.logger.info(f"  Certificate issued and ready to use")
-                self.logger.info(f"  Trust Bundle received from agent")
-
                 return True
             else:
                 self.logger.error("No SVIDs in response")
@@ -212,93 +147,110 @@ class WorkloadAPIClient:
             self._stream_x509_svids(on_update)
         )
 
+    def _build_metadata(self):
+        """Build gRPC metadata for workload attestation."""
+        metadata = []
+        if self.socket_path.startswith("tcp://"):
+            metadata.append(('x-pid', str(os.getpid())))
+
+        # Kubernetes metadata
+        for env_key, meta_key in [
+            ('POD_NAMESPACE', 'x-k8s-namespace'),
+            ('POD_NAME', 'x-k8s-pod-name'),
+            ('POD_UID', 'x-k8s-pod-uid'),
+            ('SERVICE_ACCOUNT', 'x-k8s-service-account'),
+            ('POD_LABEL_APP', 'x-k8s-pod-label-app'),
+        ]:
+            val = os.getenv(env_key)
+            if val:
+                metadata.append((meta_key, val))
+
+        # Docker metadata
+        for env_key, meta_key in [
+            ('DOCKER_CONTAINER_ID', 'x-docker-container-id'),
+            ('DOCKER_CONTAINER_NAME', 'x-docker-container-name'),
+            ('DOCKER_IMAGE_NAME', 'x-docker-image-name'),
+        ]:
+            val = os.getenv(env_key)
+            if val:
+                metadata.append((meta_key, val))
+
+        for key, value in os.environ.items():
+            if key.startswith('DOCKER_LABEL_'):
+                label_name = key[13:].lower()
+                metadata.append((f'x-docker-label-{label_name}', value))
+
+        return metadata
+
     async def _stream_x509_svids(self, on_update=None):
-        """Background task to stream SVID updates"""
-        try:
-            # Create request
-            request = workload_pb2.X509SVIDRequest()
+        """Background task to stream SVID updates with automatic reconnection."""
+        backoff = 1  # initial backoff in seconds
+        max_backoff = 60
 
-            # For TCP sockets, send PID in gRPC metadata
-            metadata = []
-            if self.socket_path.startswith("tcp://"):
-                pid = os.getpid()
-                metadata.append(('x-pid', str(pid)))
-                self.logger.debug(f"Sending PID {pid} in gRPC metadata for streaming")
+        while self.running:
+            try:
+                # Ensure we have a connection
+                if not self.stub:
+                    await self.connect()
 
-            # Send Kubernetes metadata if available (for cross-pod attestation)
-            k8s_namespace = os.getenv('POD_NAMESPACE')
-            k8s_pod_name = os.getenv('POD_NAME')
-            k8s_pod_uid = os.getenv('POD_UID')
-            k8s_service_account = os.getenv('SERVICE_ACCOUNT')
-            k8s_pod_label_app = os.getenv('POD_LABEL_APP')
+                request = workload_pb2.X509SVIDRequest()
+                metadata = self._build_metadata()
 
-            if k8s_namespace:
-                metadata.append(('x-k8s-namespace', k8s_namespace))
-            if k8s_pod_name:
-                metadata.append(('x-k8s-pod-name', k8s_pod_name))
-            if k8s_pod_uid:
-                metadata.append(('x-k8s-pod-uid', k8s_pod_uid))
-            if k8s_service_account:
-                metadata.append(('x-k8s-service-account', k8s_service_account))
-            if k8s_pod_label_app:
-                metadata.append(('x-k8s-pod-label-app', k8s_pod_label_app))
+                stream = self.stub.FetchX509SVID(request, metadata=tuple(metadata))
+                self.logger.info("✓ Streaming X.509-SVIDs...")
 
-            # Send Docker metadata if available (for Docker workload attestation)
-            docker_container_id = os.getenv('DOCKER_CONTAINER_ID')
-            docker_container_name = os.getenv('DOCKER_CONTAINER_NAME')
-            docker_image_name = os.getenv('DOCKER_IMAGE_NAME')
+                # Reset backoff on successful stream open
+                backoff = 1
 
-            if docker_container_id:
-                metadata.append(('x-docker-container-id', docker_container_id))
-            if docker_container_name:
-                metadata.append(('x-docker-container-name', docker_container_name))
-            if docker_image_name:
-                metadata.append(('x-docker-image-name', docker_image_name))
+                async for response in stream:
+                    if not self.running:
+                        return
 
-            # Send Docker labels as metadata (prefixed with DOCKER_LABEL_)
-            for key, value in os.environ.items():
-                if key.startswith('DOCKER_LABEL_'):
-                    label_name = key[13:].lower()  # Remove 'DOCKER_LABEL_' prefix
-                    metadata.append((f'x-docker-label-{label_name}', value))
+                    if len(response.svids) > 0:
+                        svid = response.svids[0]
 
-            # DEBUG: Print metadata being sent
-            print(f"[SDK DEBUG STREAM] Metadata being sent to agent: {metadata}", flush=True)
-            print(f"[SDK DEBUG STREAM] Metadata tuple: {tuple(metadata)}", flush=True)
+                        self.spiffe_id = svid.spiffe_id
+                        self.certificate = svid.x509_svid.decode('utf-8')
+                        self.private_key = svid.x509_svid_key.decode('utf-8')
+                        self.trust_bundle = svid.bundle.decode('utf-8')
 
-            # Open streaming RPC - Convert metadata list to tuple for gRPC
-            stream = self.stub.FetchX509SVID(request, metadata=tuple(metadata))
+                        self.logger.info("✓ Received SVID update")
+                        self.logger.info(f"  SPIFFE ID: {self.spiffe_id}")
+                        self.logger.info(f"  Certificate refreshed from agent")
+                        self.logger.info(f"  Trust Bundle updated")
 
-            self.logger.info("✓ Streaming X.509-SVIDs...")
+                        if on_update:
+                            await on_update(self)
 
-            # Read responses from stream
-            async for response in stream:
-                if not self.running:
-                    break
+                # Stream ended cleanly (server closed) — reconnect
+                if self.running:
+                    self.logger.warning("SVID stream ended by server, reconnecting...")
 
-                if len(response.svids) > 0:
-                    svid = response.svids[0]
+            except asyncio.CancelledError:
+                self.logger.info("SVID stream cancelled")
+                return
+            except grpc.RpcError as e:
+                code = e.code() if hasattr(e, 'code') else 'UNKNOWN'
+                details = e.details() if hasattr(e, 'details') else str(e)
+                self.logger.warning(f"gRPC stream error: {code} - {details}, reconnecting in {backoff}s...")
+            except Exception as e:
+                self.logger.warning(f"SVID stream error: {e}, reconnecting in {backoff}s...")
 
-                    # Update cached SVID
-                    self.spiffe_id = svid.spiffe_id
-                    self.certificate = svid.x509_svid.decode('utf-8')
-                    self.private_key = svid.x509_svid_key.decode('utf-8')
-                    self.trust_bundle = svid.bundle.decode('utf-8')
+            if not self.running:
+                return
 
-                    self.logger.info("✓ Received SVID update")
-                    self.logger.info(f"  SPIFFE ID: {self.spiffe_id}")
-                    self.logger.info(f"  Certificate refreshed from agent")
-                    self.logger.info(f"  Trust Bundle updated")
+            # Close stale channel before reconnecting
+            try:
+                if self.channel:
+                    await self.channel.close()
+            except Exception:
+                pass
+            self.channel = None
+            self.stub = None
 
-                    # Call update callback if provided
-                    if on_update:
-                        await on_update(self)
-
-        except asyncio.CancelledError:
-            self.logger.info("SVID stream cancelled")
-        except grpc.RpcError as e:
-            self.logger.error(f"gRPC stream error: {e.code()} - {e.details()}")
-        except Exception as e:
-            self.logger.error(f"Error in SVID stream: {e}")
+            # Wait with exponential backoff
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
     async def fetch_jwt_svid(
         self,
