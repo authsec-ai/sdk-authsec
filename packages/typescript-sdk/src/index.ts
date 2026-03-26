@@ -38,7 +38,7 @@ export { runMcpServerWithOAuth } from './mcp-server.js';
 export type { RunMcpServerOptions } from './mcp-server.js';
 
 // Configuration
-export { configureAuth, getConfig, isConfigured } from './config.js';
+export { configureAuth, getConfig, isConfigured, loadConfigFile } from './config.js';
 
 // HTTP / Testing
 export { testAuthService, testServices } from './http.js';

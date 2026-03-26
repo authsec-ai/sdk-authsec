@@ -25,11 +25,20 @@ import asyncio
 import json
 import time
 import logging
+import ssl
 from typing import Dict, Optional, List, Any
 
 import aiohttp
+import certifi
 
 logger = logging.getLogger(__name__)
+
+
+def _ssl_for_url(url: str):
+    host = aiohttp.client_reqrep.URL(url).host or ""
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 class DelegationError(Exception):
@@ -143,10 +152,11 @@ class DelegationClient:
         params = {"client_id": self.client_id}
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
+        ssl_ctx = _ssl_for_url(url)
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers=headers, params=params) as resp:
+                async with session.get(url, headers=headers, params=params, ssl=ssl_ctx) as resp:
                     body = await resp.json()
 
                     if resp.status == 200:
@@ -251,10 +261,11 @@ class DelegationClient:
         req_headers["Authorization"] = f"Bearer {token}"
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
+        ssl_ctx = _ssl_for_url(url)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.request(
-                method, url, headers=req_headers, json=json_body, **kwargs
+                method, url, headers=req_headers, json=json_body, ssl=ssl_ctx, **kwargs
             ) as resp:
                 # Read response body so it can be used after context exits
                 body = await resp.read()
@@ -265,7 +276,7 @@ class DelegationClient:
                     await self.pull_token()
                     req_headers["Authorization"] = f"Bearer {self._token}"
                     async with session.request(
-                        method, url, headers=req_headers, json=json_body, **kwargs
+                        method, url, headers=req_headers, json=json_body, ssl=ssl_ctx, **kwargs
                     ) as retry_resp:
                         return retry_resp
 
@@ -288,10 +299,11 @@ class DelegationClient:
         req_headers["Authorization"] = f"Bearer {token}"
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
+        ssl_ctx = _ssl_for_url(url)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.request(
-                method, url, headers=req_headers, json=json_body, **kwargs
+                method, url, headers=req_headers, json=json_body, ssl=ssl_ctx, **kwargs
             ) as resp:
                 body = await resp.json()
 
@@ -300,7 +312,7 @@ class DelegationClient:
                     await self.pull_token()
                     req_headers["Authorization"] = f"Bearer {self._token}"
                     async with session.request(
-                        method, url, headers=req_headers, json=json_body, **kwargs
+                        method, url, headers=req_headers, json=json_body, ssl=ssl_ctx, **kwargs
                     ) as retry_resp:
                         return await retry_resp.json()
 

@@ -7,6 +7,7 @@ backed by the hosted AuthSec SDK Manager.
 
 import json
 import os
+import ssl
 import urllib.parse
 import aiohttp
 import asyncio
@@ -22,23 +23,122 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dataclasses import dataclass
 import logging
+import certifi
 
 logger = logging.getLogger(__name__)
 
+def _create_ssl_context() -> ssl.SSLContext:
+    """Create an SSL context using certifi's CA bundle."""
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _should_verify_ssl(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    return host not in {"localhost", "127.0.0.1", "::1"}
+
+
+def _ssl_for_url(url: str):
+    return _create_ssl_context() if _should_verify_ssl(url) else False
+
+
+def _default_config() -> Dict[str, Any]:
+    return {
+        "client_id": None,
+        "app_name": None,
+        "auth_service_url": _DEFAULT_AUTH_SERVICE_URL,
+        "services_base_url": _DEFAULT_SERVICES_BASE_URL,
+        "timeout": 10,
+        "retries": 3,
+    }
+
+
+def _normalize_url(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return normalized.rstrip("/")
+
+
+def _resolve_config_value(
+    explicit_value: Optional[str],
+    env_key: str,
+    file_cfg: Dict[str, Any],
+    file_key: str,
+    default_value: str,
+) -> str:
+    env_value = _normalize_url(os.getenv(env_key))
+    file_value = _normalize_url(file_cfg.get(file_key))
+    explicit_normalized = _normalize_url(explicit_value)
+    return explicit_normalized or env_value or file_value or default_value
+
+
+def _read_response_payload(response) -> Dict[str, Any]:
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    try:
+        data = awaitable_json = response.json(content_type=None)
+    except TypeError:
+        awaitable_json = response.json()
+    try:
+        return asyncio.get_event_loop().run_until_complete(awaitable_json)  # type: ignore[arg-type]
+    except RuntimeError:
+        # We are already inside an event loop for the async request helpers.
+        raise
+
+
+async def _parse_json_response(response) -> Dict[str, Any]:
+    try:
+        payload = await response.json(content_type=None)
+        return payload if isinstance(payload, dict) else {"data": payload}
+    except Exception:
+        text = await response.text()
+        snippet = text[:500]
+        return {
+            "error": "Invalid JSON response",
+            "status": response.status,
+            "content_type": response.headers.get("Content-Type"),
+            "body": snippet,
+        }
+
+# Default URLs
+_DEFAULT_AUTH_SERVICE_URL = "https://prod.api.authsec.ai/sdkmgr/mcp-auth"
+_DEFAULT_SERVICES_BASE_URL = "https://prod.api.authsec.ai/sdkmgr/services"
+_DEFAULT_CIBA_BASE_URL = "https://prod.api.authsec.ai"
+
 # Global configuration storage
-_config = {
-    "client_id": None,
-    "app_name": None,
-    "auth_service_url": "https://dev.api.authsec.dev/authsec/sdkmgr/mcp-auth",
-    "services_base_url": "https://dev.api.authsec.dev/authsec/sdkmgr/services",
-    "timeout": 10,
-    "retries": 3
-}
+_config = _default_config()
+
+
+def _load_config_file() -> Dict[str, Any]:
+    """
+    Read .authsec.json from the current working directory.
+    Returns an empty dict when the file is absent or invalid.
+    """
+    config_path = os.path.join(os.getcwd(), ".authsec.json")
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def load_config() -> Dict[str, Any]:
+    """
+    Public helper — returns the merged config from .authsec.json (if present).
+    Useful for programmatic access to the saved configuration.
+    """
+    return _load_config_file()
 
 
 # In-memory session cache for user info (best-effort, used for oauth_user_info)
 _session_user_info: Dict[str, Any] = {}
 _current_session_id: Optional[str] = None
+_current_authenticated_session_id: Optional[str] = None
 
 
 def _decode_jwt_unverified(token: str) -> Dict[str, Any]:
@@ -63,10 +163,26 @@ def _set_current_session_id(session_id: Optional[str]) -> None:
         _current_session_id = str(session_id)
 
 
+def _set_authenticated_session_id(session_id: Optional[str]) -> None:
+    global _current_authenticated_session_id
+    if session_id:
+        _current_authenticated_session_id = str(session_id)
+
+
 def _clear_current_session_id(session_id: Optional[str] = None) -> None:
     global _current_session_id
     if session_id is None or _current_session_id == str(session_id):
         _current_session_id = None
+
+
+def _clear_authenticated_session_id(session_id: Optional[str] = None) -> None:
+    global _current_authenticated_session_id
+    if session_id is None or _current_authenticated_session_id == str(session_id):
+        _current_authenticated_session_id = None
+
+
+def _has_authenticated_session() -> bool:
+    return bool(_current_authenticated_session_id)
 
 
 def _extract_content_payload(content: Any) -> Dict[str, Any]:
@@ -89,20 +205,29 @@ def _update_current_session_from_oauth_result(tool_name: str, content: Any) -> N
         return
 
     session_id = payload.get("session_id")
-    if tool_name in {"oauth_start", "oauth_authenticate"} and session_id:
+    if tool_name == "oauth_start" and session_id:
         _set_current_session_id(session_id)
+        _clear_authenticated_session_id(session_id)
+        return
+
+    if tool_name == "oauth_authenticate" and session_id:
+        _set_current_session_id(session_id)
+        _set_authenticated_session_id(session_id)
         return
 
     if tool_name == "oauth_status":
         status = payload.get("status")
         if status == "authenticated" and session_id:
             _set_current_session_id(session_id)
+            _set_authenticated_session_id(session_id)
         elif status in {"expired", "not_found", "logged_out"}:
             _clear_current_session_id(session_id)
+            _clear_authenticated_session_id(session_id)
         return
 
     if tool_name == "oauth_logout":
         _clear_current_session_id(session_id)
+        _clear_authenticated_session_id(session_id)
 
 def _normalize_runtime_client_id(client_id: str) -> str:
     """
@@ -129,6 +254,17 @@ def _normalize_runtime_client_id(client_id: str) -> str:
     return f"{base}-main-client"
 
 
+def _is_placeholder_client_id(client_id: Optional[str]) -> bool:
+    raw = str(client_id or "").strip().lower()
+    return raw in {
+        "",
+        "your-client-id",
+        "your-client-id-here",
+        "<your-client-id>",
+        "replace-me",
+    }
+
+
 @dataclass
 class ServiceCredentials:
     service_id: str
@@ -148,7 +284,12 @@ def configure_auth(
     timeout: int = 10,
     retries: int = 3
 ):
-    """Configure authentication settings for tool protection."""
+    """
+    Configure authentication settings for tool protection.
+
+    Priority chain (highest → lowest):
+        explicit params → environment variables → .authsec.json → hardcoded defaults
+    """
     global _config
 
     if not client_id or not isinstance(client_id, str):
@@ -157,18 +298,29 @@ def configure_auth(
     if not app_name or not isinstance(app_name, str):
         raise ValueError("app_name must be a non-empty string")
 
+    file_cfg = _load_config_file()
+
+    _config.update(_default_config())
     _config.update({
         "client_id": client_id,
         "app_name": app_name,
         "timeout": timeout,
-        "retries": retries
+        "retries": retries,
+        "auth_service_url": _resolve_config_value(
+            auth_service_url,
+            "AUTHSEC_AUTH_SERVICE_URL",
+            file_cfg,
+            "auth_service_url",
+            _DEFAULT_AUTH_SERVICE_URL,
+        ),
+        "services_base_url": _resolve_config_value(
+            services_base_url,
+            "AUTHSEC_SERVICES_URL",
+            file_cfg,
+            "services_base_url",
+            _DEFAULT_SERVICES_BASE_URL,
+        ),
     })
-
-    if auth_service_url:
-        _config["auth_service_url"] = auth_service_url.rstrip('/')
-
-    if services_base_url:
-        _config["services_base_url"] = services_base_url.rstrip('/')
 
     print(f"Auth configured: {app_name} with client_id: {client_id[:8]}...")
     print(f"Auth service URL: {_config['auth_service_url']}")
@@ -186,23 +338,27 @@ async def _make_auth_request(endpoint: str, payload: Dict[str, Any] = None, meth
     }
 
     timeout = aiohttp.ClientTimeout(total=_config["timeout"])
+    request_url = f"{_config['auth_service_url']}/{endpoint}"
+    ssl_ctx = _ssl_for_url(request_url)
 
     for attempt in range(_config["retries"]):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 if method == "GET":
                     async with session.get(
-                        f"{_config['auth_service_url']}/{endpoint}",
-                        headers=headers
+                        request_url,
+                        headers=headers,
+                        ssl=ssl_ctx
                     ) as response:
-                        return await response.json()
+                        return await _parse_json_response(response)
                 else:
                     async with session.post(
-                        f"{_config['auth_service_url']}/{endpoint}",
+                        request_url,
                         json=payload,
-                        headers=headers
+                        headers=headers,
+                        ssl=ssl_ctx
                     ) as response:
-                        return await response.json()
+                        return await _parse_json_response(response)
 
         except Exception as e:
             if attempt < _config["retries"] - 1:
@@ -233,29 +389,33 @@ async def _make_services_request(endpoint: str, payload: Dict[str, Any] = None, 
     }
 
     timeout = aiohttp.ClientTimeout(total=_config["timeout"] * 2)  # Services may take longer
+    request_url = f"{_config['services_base_url']}/{endpoint}"
+    ssl_ctx = _ssl_for_url(request_url)
 
     for attempt in range(_config["retries"]):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 if method == "GET":
                     async with session.get(
-                        f"{_config['services_base_url']}/{endpoint}",
-                        headers=headers
+                        request_url,
+                        headers=headers,
+                        ssl=ssl_ctx
                     ) as response:
                         if response.status >= 400:
                             error_text = await response.text()
                             return {"error": f"HTTP {response.status}: {error_text}"}
-                        return await response.json()
+                        return await _parse_json_response(response)
                 else:
                     async with session.post(
-                        f"{_config['services_base_url']}/{endpoint}",
+                        request_url,
                         json=payload,
-                        headers=headers
+                        headers=headers,
+                        ssl=ssl_ctx
                     ) as response:
                         if response.status >= 400:
                             error_text = await response.text()
                             return {"error": f"HTTP {response.status}: {error_text}"}
-                        return await response.json()
+                        return await _parse_json_response(response)
 
         except Exception as e:
             if attempt < _config["retries"] - 1:
@@ -882,7 +1042,7 @@ class MCPServer:
                         {
                             "client_id": self.client_id,
                             "app_name": self.app_name,
-                            "session_id": _current_session_id,
+                            "session_id": _current_authenticated_session_id,
                             "user_tools": self.user_tools  # Protected tools with RBAC metadata
                         }
                     ),
@@ -898,6 +1058,13 @@ class MCPServer:
             if not remote_tools:
                 # Never return empty tools list just because upstream auth listing failed.
                 remote_tools = self._oauth_tools_fallback()
+            elif not _has_authenticated_session():
+                protected_tool_names = {tool["name"] for tool in self.user_tools if isinstance(tool, dict) and tool.get("name")}
+                remote_tools = [
+                    tool
+                    for tool in remote_tools
+                    if not isinstance(tool, dict) or tool.get("name") not in protected_tool_names
+                ]
 
             all_tools = remote_tools + self.unprotected_tools
 
@@ -980,11 +1147,10 @@ def run_mcp_server_with_oauth(
     port: int = 3005,
     spire_socket_path: Optional[str] = None
 ):
-
-    auth_service_url = os.getenv("AUTHSEC_AUTH_SERVICE_URL")
-    services_base_url = os.getenv("AUTHSEC_SERVICES_URL")
     """
-    Run MCP server using SDK Manager for auth
+    Run MCP server using SDK Manager for auth.
+
+    Priority chain for URLs: explicit params → env vars → .authsec.json → defaults
 
     Args:
         user_module: Module containing MCP tools
@@ -996,15 +1162,22 @@ def run_mcp_server_with_oauth(
                           If provided, SPIRE workload identity will be enabled.
                           If None, SPIRE is disabled (default: None)
     """
-    runtime_client_id = _normalize_runtime_client_id(client_id)
+    # Priority chain: explicit params → env vars → .authsec.json → internal defaults
+    file_cfg = _load_config_file()
+    env_client_id = (os.getenv("AUTHSEC_CLIENT_ID") or "").strip()
+    file_client_id = str(file_cfg.get("client_id") or "").strip()
+    explicit_client_id = "" if _is_placeholder_client_id(client_id) else str(client_id or "").strip()
+    resolved_client_id = explicit_client_id or env_client_id or file_client_id
+    if not resolved_client_id:
+        raise ValueError("client_id must be a non-empty string")
+
+    runtime_client_id = _normalize_runtime_client_id(resolved_client_id)
     timeout_seconds = int(os.getenv("AUTHSEC_TIMEOUT_SECONDS", "15"))
     retries = int(os.getenv("AUTHSEC_RETRIES", "2"))
 
     configure_auth(
         runtime_client_id,
         app_name,
-        auth_service_url=auth_service_url if auth_service_url else None,
-        services_base_url=services_base_url if services_base_url else None,
         timeout=timeout_seconds,
         retries=retries,
     )

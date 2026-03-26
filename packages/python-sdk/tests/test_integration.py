@@ -23,6 +23,7 @@ from authsec_sdk import (
     ServiceAccessSDK,
     ServiceAccessError,
     CIBAClient,
+    protected_by_AuthSec,
 )
 from authsec_sdk.core import (
     _make_auth_request,
@@ -30,6 +31,10 @@ from authsec_sdk.core import (
     _normalize_runtime_client_id,
     MCPServer,
     _config,
+    _set_current_session_id,
+    _clear_current_session_id,
+    _clear_authenticated_session_id,
+    mcp_tool,
 )
 
 
@@ -314,6 +319,75 @@ class TestMCPServer:
         assert "oauth_start" in tool_names
 
     @pytest.mark.asyncio
+    async def test_tools_list_hides_protected_tools_before_auth(self, monkeypatch):
+        class ExampleModule:
+            @protected_by_AuthSec("create_note", scopes=["write"])
+            async def create_note(arguments: dict) -> list:
+                return [{"type": "text", "text": json.dumps({"ok": True})}]
+
+            @mcp_tool("public_status", description="Public status tool")
+            async def public_status(arguments: dict) -> list:
+                return [{"type": "text", "text": json.dumps({"status": "ok"})}]
+
+        _clear_current_session_id()
+        _clear_authenticated_session_id()
+        server = MCPServer(CLIENT_ID, APP_NAME)
+        server.set_user_module(ExampleModule)
+
+        async def fake_make_auth_request(endpoint, payload):
+            assert endpoint == "tools/list"
+            assert payload["session_id"] is None
+            return {
+                "tools": [
+                    {"name": "oauth_start", "description": "Start auth", "inputSchema": {"type": "object", "properties": {}, "required": []}},
+                    {"name": "create_note", "description": "Protected note creation", "inputSchema": {"type": "object", "properties": {}, "required": []}},
+                ]
+            }
+
+        monkeypatch.setattr("authsec_sdk.core._make_auth_request", fake_make_auth_request)
+
+        result = await server._process_mcp_message({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        })
+        tool_names = [t["name"] for t in result["result"]["tools"]]
+        assert "oauth_start" in tool_names
+        assert "public_status" in tool_names
+        assert "create_note" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_tools_list_does_not_unlock_after_oauth_start(self, monkeypatch):
+        class ExampleModule:
+            @protected_by_AuthSec("create_note", scopes=["write"])
+            async def create_note(arguments: dict) -> list:
+                return [{"type": "text", "text": json.dumps({"ok": True})}]
+
+        _clear_authenticated_session_id()
+        _set_current_session_id("pending-session")
+        server = MCPServer(CLIENT_ID, APP_NAME)
+        server.set_user_module(ExampleModule)
+
+        async def fake_make_auth_request(endpoint, payload):
+            assert payload["session_id"] is None
+            return {
+                "tools": [
+                    {"name": "oauth_start", "description": "Start auth", "inputSchema": {"type": "object", "properties": {}, "required": []}},
+                    {"name": "create_note", "description": "Protected note creation", "inputSchema": {"type": "object", "properties": {}, "required": []}},
+                ]
+            }
+
+        monkeypatch.setattr("authsec_sdk.core._make_auth_request", fake_make_auth_request)
+
+        result = await server._process_mcp_message({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+        })
+        tool_names = [t["name"] for t in result["result"]["tools"]]
+        assert "create_note" not in tool_names
+
+    @pytest.mark.asyncio
     async def test_unknown_method_returns_error(self):
         server = MCPServer(CLIENT_ID, APP_NAME)
         result = await server._process_mcp_message({
@@ -333,7 +407,7 @@ class TestMCPServer:
 class TestCIBAClient:
     def test_init_default(self):
         client = CIBAClient()
-        assert client.base_url == "https://dev.api.authsec.dev"
+        assert client.base_url == "https://prod.api.authsec.ai"
 
     def test_init_with_base_url(self):
         client = CIBAClient(base_url="http://localhost:7468")

@@ -7,14 +7,21 @@
  * - Tenant flow: email + client_id (multi-client architecture)
  */
 
+import { loadConfigFile, DEFAULT_CIBA_BASE_URL } from './config.js';
+
 export class CIBAClient {
   private baseUrl: string;
   private clientId: string | null;
   private activePolls: Map<string, boolean>;
   private retryCounts: Map<string, number>;
 
+  /**
+   * @param options.baseUrl Priority: explicit param → .authsec.json → hardcoded default
+   */
   constructor(options?: { clientId?: string; baseUrl?: string }) {
-    this.baseUrl = options?.baseUrl ?? 'https://dev.api.authsec.dev';
+    this.baseUrl = options?.baseUrl
+      ?? loadConfigFile().ciba_base_url as string | undefined
+      ?? DEFAULT_CIBA_BASE_URL;
     this.clientId = options?.clientId ?? null;
     this.activePolls = new Map();
     this.retryCounts = new Map();

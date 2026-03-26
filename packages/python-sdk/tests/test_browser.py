@@ -358,7 +358,7 @@ async def test_mcpserver_unknown_method():
 
 def test_ciba_init_default():
     client = CIBAClient()
-    assert client.base_url == "https://dev.api.authsec.dev"
+    assert client.base_url == "https://prod.api.authsec.ai"
 
 def test_ciba_init_custom_url():
     client = CIBAClient(base_url="http://localhost:7468")
@@ -917,7 +917,7 @@ def generate_html() -> str:
   {suites_html}
 
   <div class="footer">
-    AuthSec SDK v4.0.0 &middot; Python &middot; Generated {time.strftime("%Y-%m-%d %H:%M:%S")}
+    AuthSec SDK v4.1.1 &middot; Python &middot; Generated {time.strftime("%Y-%m-%d %H:%M:%S")}
   </div>
 </div>
 </body>

@@ -1,48 +1,8 @@
 # Secure Your AI Tools in Minutes with AuthSec SDK
 
-**Add Enterprise-Grade Authentication and Authorization to Your MCP Servers with Just 3 Lines of Code**
+**Add Enterprise-Grade Authentication and Authorization to Your MCP Servers and AI agents with Just 3 Lines of Code**
 
 *Published: November 7, 2025*
-
----
-
-## Repository Structure
-
-This repository is organized as a monorepo with professional package boundaries:
-
-- `packages/python-sdk`: Python package (`authsec_sdk`)
-- `packages/typescript-sdk`: TypeScript package (`@authsec/sdk`)
-
-### Local Development
-
-Python SDK:
-
-```bash
-cd packages/python-sdk
-pip install -e .
-```
-
-TypeScript SDK:
-
-```bash
-cd packages/typescript-sdk
-npm install
-npm run build
-```
-
-Memory MCP wrapper example:
-
-```bash
-cd packages/typescript-sdk
-cp examples/memory-authsec-wrapper.env.example examples/memory-authsec-wrapper.env
-# fill in AUTHSEC_CLIENT_ID
-set -a
-source examples/memory-authsec-wrapper.env
-set +a
-npm run example:memory:local
-```
-
-See [`packages/typescript-sdk/README.md`](packages/typescript-sdk/README.md) for the full local SDK smoke-test flow and MCP Inspector steps.
 
 ---
 
@@ -75,6 +35,129 @@ run_mcp_server_with_oauth(client_id="your-client-id", app_name="My Server")
 ```
 
 That's it. Your tool is now protected by OAuth 2.0 and RBAC.
+
+---
+
+## Installation
+
+### A) Python — from PyPI
+
+```bash
+pip install authsec-sdk
+authsec init        # interactive URL + client_id setup
+```
+
+### B) TypeScript — from npm
+
+```bash
+npm i @authsec/sdk
+npx authsec init    # interactive URL + client_id setup
+```
+
+### C) Python — from source (local dev)
+
+```bash
+git clone https://github.com/authsec-ai/sdk-authsec.git
+cd sdk-authsec/packages/python-sdk
+pip install -e .
+authsec init
+```
+
+### D) TypeScript — from source (local dev)
+
+```bash
+git clone https://github.com/authsec-ai/sdk-authsec.git
+cd sdk-authsec/packages/typescript-sdk
+npm install && npm run build
+npx authsec init
+```
+
+---
+
+## Configuration
+
+Running `authsec init` creates a `.authsec.json` file in your project directory:
+
+```json
+{
+  "client_id": "your-client-id",
+  "auth_service_url": "https://prod.api.authsec.ai/sdkmgr/mcp-auth",
+  "services_base_url": "https://prod.api.authsec.ai/sdkmgr/services",
+  "ciba_base_url": "https://prod.api.authsec.ai"
+}
+```
+
+To view the saved configuration at any time:
+
+```bash
+authsec config show
+```
+
+### Priority Chain
+
+Both the Python and TypeScript SDKs resolve configuration values in the same order (highest priority first):
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | Explicit code parameters | `configure_auth(client_id, app_name, auth_service_url="...")` |
+| 2 | Environment variables | `AUTHSEC_AUTH_SERVICE_URL`, `AUTHSEC_SERVICES_URL` |
+| 3 | `.authsec.json` in cwd | Created by `authsec init` |
+| 4 | Hardcoded defaults | `https://prod.api.authsec.ai/...` |
+
+### Environment Variable Overrides
+
+| Variable | Description |
+|----------|-------------|
+| `AUTHSEC_AUTH_SERVICE_URL` | Auth service endpoint |
+| `AUTHSEC_SERVICES_URL` | Services base endpoint |
+| `AUTHSEC_TIMEOUT_SECONDS` | HTTP timeout (default: 15) |
+| `AUTHSEC_RETRIES` | Retry count (default: 2) |
+
+---
+
+## Repository Structure
+
+This repository is organized as a monorepo with professional package boundaries:
+
+- `packages/python-sdk`: Python package (`authsec_sdk`)
+- `packages/typescript-sdk`: TypeScript package (`@authsec/sdk`)
+
+Memory MCP wrapper example:
+
+```bash
+cd packages/typescript-sdk
+cp examples/memory-authsec-wrapper.env.example examples/memory-authsec-wrapper.env
+# fill in AUTHSEC_CLIENT_ID
+set -a
+source examples/memory-authsec-wrapper.env
+set +a
+npm run example:memory:local
+```
+
+See [`packages/typescript-sdk/README.md`](packages/typescript-sdk/README.md) for the full local SDK smoke-test flow and MCP Inspector steps.
+
+---
+
+## Live Demos & Testing
+
+See AuthSec SDK in action with side-by-side comparisons:
+
+**[github.com/authsec-ai/authsec-testing](https://github.com/authsec-ai/authsec-testing)**
+
+| Demo | Description | What It Shows |
+|------|-------------|---------------|
+| `mcp-server/vanilla/` | MCP server with NO auth | The security problem -- anyone can delete notes |
+| `mcp-server/protected/` | Same server WITH AuthSec | OAuth + RBAC -- tools hidden until authenticated |
+| `ai-agent/vanilla/` | AI agent with NO delegation | Shared credentials, no audit trail |
+| `ai-agent/protected/` | Same agent WITH AuthSec | Scoped tokens, permission checks, full audit |
+
+Clone and run:
+```bash
+git clone https://github.com/authsec-ai/authsec-testing.git
+cd authsec-testing/mcp-server/vanilla
+pip install -r requirements.txt
+python server.py
+```
 
 ---
 

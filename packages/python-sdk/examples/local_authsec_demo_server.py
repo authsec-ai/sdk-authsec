@@ -6,6 +6,9 @@ import sys
 
 from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
 
+DEFAULT_AUTH_SERVICE_URL = "https://prod.api.authsec.ai/sdkmgr/mcp-auth"
+DEFAULT_SERVICES_URL = "https://prod.api.authsec.ai/sdkmgr/services"
+
 
 @protected_by_AuthSec(
     "demo_status",
@@ -99,15 +102,15 @@ def main():
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "3006"))
 
-    print("[AuthSec] Python local MCP demo configuration")
+    print("[AuthSec] Python MCP demo configuration")
     print(f"[AuthSec] appName: {app_name}")
     print(f"[AuthSec] host: {host}")
     print(f"[AuthSec] port: {port}")
     print(
-        f"[AuthSec] auth service: {os.getenv('AUTHSEC_AUTH_SERVICE_URL', 'http://localhost:7468/authsec/sdkmgr/mcp-auth')}"
+        f"[AuthSec] auth service: {os.getenv('AUTHSEC_AUTH_SERVICE_URL', DEFAULT_AUTH_SERVICE_URL)}"
     )
     print(
-        f"[AuthSec] services URL: {os.getenv('AUTHSEC_SERVICES_URL', 'http://localhost:7468/authsec/sdkmgr/services')}"
+        f"[AuthSec] services URL: {os.getenv('AUTHSEC_SERVICES_URL', DEFAULT_SERVICES_URL)}"
     )
 
     run_mcp_server_with_oauth(

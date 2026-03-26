@@ -4,6 +4,9 @@
   "description": "AuthSec SDK for MCP Auth, Services, CIBA, and SPIFFE integration (TypeScript/JavaScript)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "authsec": "./dist/cli.js"
+  },
   "files": [
     "dist/",
     "src/spiffe/proto/workload.proto"

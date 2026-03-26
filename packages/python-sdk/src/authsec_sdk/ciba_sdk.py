@@ -9,12 +9,37 @@ Supports both Admin and End-User (tenant) authentication flows:
 - Tenant flow: email + client_id (multi-client architecture)
 """
 
+import json
+import os
 import requests
 import time
+import certifi
 
 
 def _is_local_base_url(base_url):
     return "localhost" in base_url or "127.0.0.1" in base_url
+
+
+def _request_kwargs(base_url, timeout=None):
+    kwargs = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    kwargs["verify"] = False if _is_local_base_url(base_url) else certifi.where()
+    return kwargs
+
+
+def _read_ciba_base_url_from_config():
+    """Read ciba_base_url from .authsec.json in cwd, or return None."""
+    try:
+        path = os.path.join(os.getcwd(), ".authsec.json")
+        if os.path.isfile(path):
+            with open(path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data.get("ciba_base_url")
+    except Exception:
+        pass
+    return None
 
 
 class CIBAClient:
@@ -48,13 +73,14 @@ class CIBAClient:
     def __init__(self, client_id=None, base_url=None):
         """
         Initialize the AuthSec SDK.
-        
+
         Args:
             client_id: Optional client ID for tenant/end-user flow. If provided, uses tenant endpoints.
                       If None, uses admin endpoints.
-            base_url: Optional base URL override. Defaults to production API.
+            base_url: Optional base URL override.
+                      Priority: explicit param → .authsec.json → hardcoded default.
         """
-        self.base_url = base_url or "https://dev.api.authsec.dev"
+        self.base_url = base_url or _read_ciba_base_url_from_config() or "https://prod.api.authsec.ai"
         self.client_id = client_id  # Optional: for tenant multi-client architecture
         self.active_polls = {}  # Map email -> cancellation_flag
         self.retry_counts = {}  # Map email -> int
@@ -89,8 +115,15 @@ class CIBAClient:
             endpoint = f"{self.base_url}/authsec/uflow/auth/ciba/initiate"
             payload = {"login_hint": email, "binding_message": "Authentication requested via Voice SDK"}
         
-        response = requests.post(endpoint, json=payload)
-        return response.json()
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
+            return response.json()
+        except requests.RequestException as e:
+            return {"success": False, "error": str(e)}
 
     def verify_totp(self, email, code):
         """
@@ -121,7 +154,11 @@ class CIBAClient:
             payload = {"email": email, "totp_code": code}
         
         try:
-            response = requests.post(endpoint, json=payload, timeout=10)
+            response = requests.post(
+                endpoint,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             res_data = response.json()
 
             # The API returns 'token' or 'access_token'
@@ -167,8 +204,15 @@ class CIBAClient:
         while time.time() - start_time < timeout:
             if self.active_polls.get(email) is True:
                 return {"status": "cancelled"}
-            response = requests.post(endpoint, json=payload)
-            data = response.json()
+            try:
+                response = requests.post(
+                    endpoint,
+                    json=payload,
+                    **_request_kwargs(self.base_url, timeout=10),
+                )
+                data = response.json()
+            except requests.RequestException as e:
+                return {"status": "error", "error": str(e)}
 
             # Handle both key names
             token = data.get("access_token") or data.get("token")
@@ -209,7 +253,11 @@ class CIBAClient:
         payload = {"client_id": self.client_id, "email": email, "password": password}
 
         try:
-            response = requests.post(endpoint, json=payload, timeout=10)
+            response = requests.post(
+                endpoint,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             return response.json()
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -228,7 +276,11 @@ class CIBAClient:
         payload = {"email": email, "tenant_id": tenant_id}
 
         try:
-            response = requests.post(endpoint, json=payload, timeout=10)
+            response = requests.post(
+                endpoint,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             return response.json()
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -248,7 +300,11 @@ class CIBAClient:
         payload = {"email": email, "client_id": self.client_id}
 
         try:
-            response = requests.post(endpoint, json=payload, timeout=10)
+            response = requests.post(
+                endpoint,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             return response.json()
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -276,7 +332,12 @@ class CIBAClient:
         }
 
         try:
-            response = requests.post(endpoint, headers=headers, json=payload, timeout=10)
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             return response.json()
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -294,7 +355,11 @@ class CIBAClient:
         headers = {"Authorization": f"Bearer {jwt_token}"}
 
         try:
-            response = requests.get(endpoint, headers=headers, timeout=10)
+            response = requests.get(
+                endpoint,
+                headers=headers,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             return response.json()
         except Exception as e:
             return {"success": False, "error": str(e), "requests": []}
@@ -322,7 +387,12 @@ class CIBAClient:
         }
 
         try:
-            response = requests.post(endpoint, headers=headers, json=payload, timeout=10)
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                **_request_kwargs(self.base_url, timeout=10),
+            )
             return response.json()
         except Exception as e:
             return {"success": False, "error": str(e)}

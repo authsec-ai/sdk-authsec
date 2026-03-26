@@ -7,6 +7,7 @@ from .core import (
     configure_auth,
     get_config,
     is_configured,
+    load_config,
     test_auth_service,
     test_services
 )
@@ -26,7 +27,7 @@ try:
 except ImportError:
     WorkloadSVID = None
 
-__version__ = "4.0.0"
+__version__ = "4.1.2"
 __all__ = [
     # MCP Auth & Services
     "protected_by_AuthSec",
@@ -36,6 +37,7 @@ __all__ = [
     "configure_auth",
     "get_config",
     "is_configured",
+    "load_config",
     "test_auth_service",
     "test_services",
     # CIBA SDK for Voice Clients
