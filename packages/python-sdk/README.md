@@ -1,231 +1,251 @@
-# AuthSec Python SDK (`authsec-sdk`)
+# AuthSec SDK — Python
 
-AuthSec Python SDK covers:
-
-- MCP OAuth + RBAC enforcement
-- Trust delegation for AI agents
-- Hosted service credential access
-- CIBA / passwordless authentication
-- SPIFFE workload identity helpers
+Zero-config workload identity for your services. Get mTLS certificates, validate JWT-SVIDs, and enable service-to-service authentication — all through the ICP Agent running on your infrastructure.
 
 ## Install
 
 ```bash
-python3 -m pip install -U authsec-sdk
+pip install git+https://github.com/authsec-ai/sdk-authsec.git#subdirectory=packages/python-sdk
 ```
 
-From this repo during development:
+## Quick Start
 
-```bash
-python3 -m pip install -e packages/python-sdk
-```
-
-## Import Paths
-
-Canonical package import:
+### 1. Get workload identity (X.509-SVID)
 
 ```python
-from authsec_sdk import protected_by_AuthSec, run_mcp_server_with_oauth
+from authsec_sdk import QuickStartSVID
+
+# One line — connects to agent, fetches SVID, enables auto-renewal
+svid = await QuickStartSVID.initialize(
+    socket_path="/run/spire/sockets/agent.sock"
+)
+
+print(f"Identity: {svid.spiffe_id}")
+# spiffe://9936a009-.../workload/my-service
 ```
 
-Trust delegation, top-level import:
+### 2. Run an mTLS server (FastAPI + Uvicorn)
 
 ```python
-from authsec_sdk import DelegationClient
-```
+import uvicorn
+from fastapi import FastAPI
 
-Trust delegation, direct submodule import:
+app = FastAPI()
 
-```python
-from authsec_sdk.delegation_sdk import (
-    DelegationClient,
-    DelegationError,
-    DelegationTokenExpired,
-    DelegationTokenNotFound,
+@app.get("/health")
+async def health():
+    return {"status": "ok", "identity": svid.spiffe_id}
+
+# Start with mTLS — only callers with valid SVIDs can connect
+uvicorn.run(
+    app,
+    host="0.0.0.0",
+    port=8443,
+    ssl_keyfile=str(svid.key_file_path),
+    ssl_certfile=str(svid.cert_file_path),
+    ssl_ca_certs=str(svid.ca_file_path),
+    ssl_cert_reqs=2,  # CERT_REQUIRED
 )
 ```
 
-Legacy compatibility shim:
+### 3. Call another service over mTLS
 
 ```python
-from AuthSec_SDK import protected_by_AuthSec, run_mcp_server_with_oauth
+import httpx
+
+ssl_ctx = svid.create_ssl_context_for_client()
+
+async with httpx.AsyncClient(verify=ssl_ctx) as client:
+    resp = await client.get("https://other-service:8443/health")
+    print(resp.json())
 ```
 
-## MCP Quick Start
+### 4. Validate incoming JWT-SVIDs
+
+When another service sends a JWT-SVID in the `Authorization: Bearer` header, validate it:
 
 ```python
-from authsec_sdk import mcp_tool, protected_by_AuthSec, run_mcp_server_with_oauth
+token = request.headers["Authorization"].split(" ")[1]
 
+result = await svid.validate_jwt_svid(token, audience="my-api")
+if result:
+    print(f"Caller: {result['spiffe_id']}")
+    print(f"Claims: {result['claims']}")
+else:
+    print("Invalid token")
+```
 
-@mcp_tool(
-    name="ping",
-    description="Health check",
-    inputSchema={"type": "object", "properties": {}, "required": []},
-)
-async def ping(arguments: dict) -> list:
-    return [{"type": "text", "text": "pong"}]
+### 5. Fetch a JWT-SVID (to call a permission-protected service)
 
+```python
+token = await svid.fetch_jwt_svid(audience=["target-api"])
 
-@protected_by_AuthSec(
-    tool_name="delete_invoice",
-    permissions=["tool:delete_invoice"],
-    require_all=True,
-    description="Delete invoice by id",
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "invoice_id": {"type": "string"},
-            "session_id": {"type": "string"},
-        },
-        "required": ["invoice_id"],
-    },
-)
-async def delete_invoice(arguments: dict) -> list:
-    user = (arguments.get("_user_info") or {}).get("email_id", "unknown")
-    return [{"type": "text", "text": f"Deleted {arguments['invoice_id']} by {user}"}]
+# Send as Bearer token alongside mTLS
+headers = {"Authorization": f"Bearer {token}"}
+resp = await client.post("https://other-service:8443/action", headers=headers, json={...})
+```
 
+## Full Example — Service with mTLS + JWT-SVID
+
+```python
+import asyncio, os, ssl
+from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+from authsec_sdk import QuickStartSVID
+
+app = FastAPI()
+svid = None
+
+@app.on_event("startup")
+async def startup():
+    global svid
+    svid = await QuickStartSVID.initialize(
+        socket_path=os.getenv("SPIFFE_ENDPOINT_SOCKET", "/run/spire/sockets/agent.sock")
+    )
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "spiffe_id": svid.spiffe_id}
+
+@app.post("/protected-action")
+async def protected(request: Request):
+    # Verify caller's JWT-SVID
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "JWT-SVID required")
+
+    result = await svid.validate_jwt_svid(auth.split(" ")[1], audience="my-api")
+    if not result:
+        raise HTTPException(403, "Invalid JWT-SVID")
+
+    caller = result["spiffe_id"]
+    claims = result["claims"]
+
+    # Check permissions from claims
+    if "my-resource:write" not in claims.get("permissions", []):
+        raise HTTPException(403, "Insufficient permissions")
+
+    return {"message": "success", "caller": caller}
 
 if __name__ == "__main__":
-    import __main__
-
-    run_mcp_server_with_oauth(
-        user_module=__main__,
-        client_id="YOUR_CLIENT_ID",
-        app_name="my-mcp-server",
-        host="127.0.0.1",
-        port=3005,
+    asyncio.run(startup())
+    uvicorn.run(
+        app, host="0.0.0.0", port=8443,
+        ssl_keyfile=str(svid.key_file_path),
+        ssl_certfile=str(svid.cert_file_path),
+        ssl_ca_certs=str(svid.ca_file_path),
+        ssl_cert_reqs=ssl.CERT_REQUIRED,
     )
 ```
 
-## Trust Delegation for Agents
+## Kubernetes Deployment
 
-Use trust delegation when an AI agent should pull a delegated JWT-SVID and gate its own tools from delegated permissions.
+Your workload needs two things:
 
-```python
-from authsec_sdk import DelegationClient
+1. **Mount the agent socket** as a volume
+2. **Set `SPIFFE_ENDPOINT_SOCKET`** environment variable
 
-
-client = DelegationClient(
-    client_id="YOUR_AGENT_CLIENT_ID",
-    userflow_url="https://prod.api.authsec.ai/uflow",
-)
-
-token_info = await client.pull_token()
-
-if client.has_permission("users:read"):
-    result = await client.request_json(
-        "GET",
-        "https://api.example.com/users",
-    )
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-service
+spec:
+  template:
+    spec:
+      serviceAccountName: my-service  # Must match registered workload entry
+      containers:
+        - name: my-service
+          image: my-registry/my-service:latest
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "/run/spire/sockets/agent.sock"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            - name: POD_LABEL_APP
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory
 ```
 
-Available delegation surface:
+## Dockerfile
 
-- `pull_token()`
-- `ensure_token()`
-- `has_permission()`
-- `has_any_permission()`
-- `has_all_permissions()`
-- `request()`
-- `request_json()`
-- `get_auth_header()`
-- `decode_token_claims()`
-- properties: `token`, `permissions`, `spiffe_id`, `is_expired`, `expires_in_seconds`, `client_id`
+```dockerfile
+FROM python:3.11-slim
 
-`request()` returns a buffered `DelegationHTTPResponse` with:
+WORKDIR /app
 
-- `status`
-- `headers`
-- `body`
-- `url`
-- `ok`
-- `text()`
-- `json()`
+RUN apt-get update && apt-get install -y --no-install-recommends git gcc \
+    && rm -rf /var/lib/apt/lists/*
 
-Refresh behavior:
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-- If the cached token is near expiry, `ensure_token()` re-pulls it automatically.
-- If a downstream request returns `401`, the client refreshes once and retries once.
+# Install AuthSec SDK
+RUN pip install git+https://github.com/authsec-ai/sdk-authsec.git#subdirectory=packages/python-sdk
 
-Error behavior:
-
-- `DelegationTokenNotFound`: no active delegation token for this client
-- `DelegationTokenExpired`: server reports expired delegation
-- `DelegationError`: network, parsing, or generic API failures
-
-## Agent Compatibility Note
-
-The compatibility benchmark for trust delegation is the external example agent at `/Users/pc/Downloads/generic_agent.py`.
-
-This package is compatible with that style of usage:
-
-- direct import from `authsec_sdk.delegation_sdk`
-- permission checks via `has_permission()`
-- token access via `ensure_token()`
-- identity inspection via `decode_token_claims()`
-
-Important:
-
-- The SDK does not require any repo-local `sys.path` hack.
-- A normal `pip install authsec-sdk` is sufficient.
-- If your agent uses OpenAI, `openai` is an application dependency. It is not bundled with this SDK.
-
-## Other Surfaces
-
-Hosted service access:
-
-```python
-from authsec_sdk import ServiceAccessSDK
+COPY . .
+CMD ["python", "main.py"]
 ```
 
-CIBA:
+## API Reference
 
-```python
-from authsec_sdk import CIBAClient
+### `QuickStartSVID`
+
+| Method | Description |
+|---|---|
+| `await QuickStartSVID.initialize(socket_path)` | Connect to agent, fetch SVID, start auto-renewal. Returns singleton. |
+| `await svid.validate_jwt_svid(token, audience)` | Validate a JWT-SVID via agent. Returns `{'spiffe_id': ..., 'claims': {...}}` or `None`. |
+| `await svid.fetch_jwt_svid(audience, spiffe_id?)` | Fetch a JWT-SVID from the agent. Returns token string or `None`. |
+| `svid.create_ssl_context_for_server()` | SSL context for mTLS server (requires client certs). |
+| `svid.create_ssl_context_for_client()` | SSL context for mTLS client (presents SVID cert). |
+| `svid.spiffe_id` | Current SPIFFE ID string. |
+| `svid.certificate` | PEM certificate string. |
+| `svid.private_key` | PEM private key string. |
+| `svid.trust_bundle` | PEM CA bundle string. |
+| `svid.cert_file_path` | Path to cert file on disk (auto-updated on renewal). |
+| `svid.key_file_path` | Path to key file on disk. |
+| `svid.ca_file_path` | Path to CA bundle file on disk. |
+
+## How It Works
+
+```
+Your Service  →  SDK (QuickStartSVID)  →  gRPC Unix Socket  →  ICP Agent  →  ICP Service
+                                                                   ↑
+                                                          (runs on same node,
+                                                           handles all crypto)
 ```
 
-SPIFFE:
+- The SDK talks to the **ICP Agent** via a local Unix socket — no network calls from your code
+- The agent handles node attestation, workload attestation, cert issuance, and rotation
+- Your service never needs to know the ICP Service URL, CA bundles, or tenant configuration
+- Certificates auto-renew in the background — no restarts needed
 
-```python
-from authsec_sdk import QuickStartSVID, WorkloadAPIClient, WorkloadSVID
-```
+## Requirements
 
-## Environment Variables
-
-MCP SDK runtime:
-
-- `AUTHSEC_AUTH_SERVICE_URL`
-- `AUTHSEC_SERVICES_URL`
-- `AUTHSEC_TIMEOUT_SECONDS`
-- `AUTHSEC_RETRIES`
-- `AUTHSEC_TOOLS_LIST_TIMEOUT_SECONDS`
-- `AUTHSEC_OAUTH_TOOL_TIMEOUT_SECONDS`
-
-Typical trust delegation app config:
-
-- `CLIENT_ID`
-- `USERFLOW_URL`
-- `BASE_API_URL`
-
-## Troubleshooting
-
-- `ModuleNotFoundError: No module named 'authsec_sdk'`
-  - Install the package into the same Python interpreter you use to run the app.
-- `ModuleNotFoundError: No module named 'AuthSec_SDK'`
-  - Upgrade to a current release or switch to the canonical `authsec_sdk` import path.
-- `DelegationTokenNotFound`
-  - No delegation exists yet for the agent client. An admin must delegate first.
-- `DelegationTokenExpired`
-  - Pull a fresh delegated token or have an admin renew the delegation.
-- Downstream request fails after refresh
-  - Inspect the downstream API, audience, and delegated permissions. The SDK retries only once after `401`.
-
-## Publishing
-
-```bash
-cd /absolute/path/to/sdk-authsec/packages/python-sdk
-python3 -m pip install --upgrade build twine
-python3 -m build
-python3 -m twine check dist/*
-python3 -m twine upload dist/*
-```
+- Python >= 3.10
+- ICP Agent running on the same node (deployed by your platform team)
+- Workload entry registered for your service's namespace + service account

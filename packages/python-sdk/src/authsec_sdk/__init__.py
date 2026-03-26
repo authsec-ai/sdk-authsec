@@ -23,6 +23,16 @@ from .delegation_sdk import (
     DelegationTokenNotFound,
 )
 
+# Import External Service SDK for Vault credential access
+from .exsvc_sdk import (
+    ExternalServiceClient,
+    ExternalServiceError,
+    ExternalServiceAuthError,
+    ExternalServiceNotFoundError,
+    ServiceCredentials as ExSvcCredentials,
+    ServiceInfo,
+)
+
 # Import standalone SPIFFE Workload API SDK
 from .spiffe_workload_api import QuickStartSVID, WorkloadAPIClient
 
@@ -44,6 +54,13 @@ __all__ = [
     "is_configured",
     "test_auth_service",
     "test_services",
+    # External Service SDK for Vault Credentials
+    "ExternalServiceClient",
+    "ExternalServiceError",
+    "ExternalServiceAuthError",
+    "ExternalServiceNotFoundError",
+    "ExSvcCredentials",
+    "ServiceInfo",
     # CIBA SDK for Voice Clients
     "CIBAClient",
     # Delegation SDK for AI Agent Trust Delegation
