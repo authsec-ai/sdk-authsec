@@ -36,6 +36,9 @@ from .exsvc_sdk import (
 # Import standalone SPIFFE Workload API SDK
 from .spiffe_workload_api import QuickStartSVID, WorkloadAPIClient
 
+# Import Agent Identity SDK for autonomous agent-to-agent workloads
+from .agent_identity import AgentIdentity, AgentIdentityError
+
 # Also import SDK Manager SPIRE integration (optional)
 try:
     from .spire_sdk import WorkloadSVID
@@ -73,5 +76,8 @@ __all__ = [
     "QuickStartSVID",
     "WorkloadAPIClient",
     "WorkloadSVID",
+    # Agent Identity SDK for autonomous agent-to-agent workloads
+    "AgentIdentity",
+    "AgentIdentityError",
     "mcp_tool",
 ]

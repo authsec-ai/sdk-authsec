@@ -147,11 +147,22 @@ class WorkloadAPIClient:
             self._stream_x509_svids(on_update)
         )
 
+    def _get_host_pid(self) -> str:
+        """Get the host PID from /proc/self/status (works inside Docker with --pid=host)."""
+        try:
+            with open('/proc/self/status') as f:
+                for line in f:
+                    if line.startswith('NSpid:'):
+                        # NSpid: <host_pid> <namespace_pid>
+                        pids = line.split()[1:]
+                        return pids[0]  # first entry is host PID
+        except Exception:
+            pass
+        return str(os.getpid())
+
     def _build_metadata(self):
         """Build gRPC metadata for workload attestation."""
-        metadata = []
-        if self.socket_path.startswith("tcp://"):
-            metadata.append(('x-pid', str(os.getpid())))
+        metadata = [('x-pid', self._get_host_pid())]  # always send host PID
 
         # Kubernetes metadata
         for env_key, meta_key in [
