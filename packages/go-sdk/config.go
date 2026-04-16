@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// Config holds the AuthSec SDK configuration for protecting an MCP resource server.
 type Config struct {
 	Issuer                    string
 	AuthorizationServer       string
@@ -17,12 +18,19 @@ type Config struct {
 	IntrospectionClientSecret string
 	ResourceURI               string
 	ResourceName              string
-	SupportedScopes           []string
-	BearerMethodsSupported    []string
-	HTTPClient                *http.Client
-	Logger                    *slog.Logger
-	Policy                    ToolPolicy
-	Now                       func() time.Time
+
+	// SupportedScopes lists the OAuth scopes this resource server advertises.
+	// Optional if the resource server is already registered in AuthSec — AuthSec
+	// maintains the authoritative scope registry via auto-discovery and the
+	// Scope Matrix UI. When provided here, these scopes are included in the
+	// protected-resource metadata response.
+	SupportedScopes []string
+
+	BearerMethodsSupported []string
+	HTTPClient             *http.Client
+	Logger                 *slog.Logger
+	Policy                 ToolPolicy
+	Now                    func() time.Time
 }
 
 func (c Config) Validate() error {

@@ -203,7 +203,10 @@ func testConfig(t *testing.T) (Config, string, func()) {
 		ResourceURI:               "https://mcp.example.com/mcp",
 		ResourceName:              "GitHub MCP Server",
 		SupportedScopes:           []string{"issues:read", "issues:write"},
-		Policy:                    GitHubDefaultPolicy(),
+		Policy: StaticPolicy{
+			"list_issues":  {AnyOfScopes: []string{"issues:read"}},
+			"create_issue": {AnyOfScopes: []string{"issues:write"}},
+		},
 	}
 
 	return cfg, token, func() {

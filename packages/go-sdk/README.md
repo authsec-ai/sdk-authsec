@@ -81,7 +81,7 @@ It currently provides:
 - hybrid JWT + introspection validation
 - principal context injection
 - tool policy enforcement
-- a built-in default GitHub tool policy map
+- generic policy primitives (`StaticPolicy`, `OverrideToolPolicy`, `RequiredScopesForTool`)
 
 It does not include:
 
@@ -291,7 +291,7 @@ func main() {
 		IntrospectionClientID:     "resource-server",
 		IntrospectionClientSecret: "<introspection-secret-from-authsec>",
 		ResourceURI:               "https://20-106-226-245.sslip.io/mcp",
-		ResourceName:              "GitHub MCP Server",
+	ResourceName:              "GitHub MCP Server",
 		SupportedScopes: []string{
 			"issues:read",
 			"issues:write",
@@ -304,7 +304,10 @@ func main() {
 			"security:read",
 			"admin:write",
 		},
-		Policy: authsecsdk.GitHubDefaultPolicy(),
+		Policy: authsecsdk.StaticPolicy{
+			"list_issues":  {AnyOfScopes: []string{"issues:read"}},
+			"create_issue": {AnyOfScopes: []string{"issues:write"}},
+		},
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -332,44 +335,54 @@ With the wrapper in place, the SDK:
 
 You do not need to hand-build the protected-resource metadata endpoints yourself.
 
-## Step 4: Pick a policy model
+## Step 4: Understand the policy model
 
-The SDK ships with a default GitHub policy map:
+AuthSec is the source of truth for scopes. When you register a resource server in AuthSec and trigger a rescan, AuthSec auto-discovers your MCP tools (via `tools/list`) and creates OAuth scopes in its registry. The authoritative scope-to-tool mapping lives in the AuthSec Scope Matrix UI.
 
-- `issues:read`
-- `issues:write`
-- `pull_requests:read`
-- `pull_requests:write`
-- `repos:read`
-- `repos:write`
-- `actions:read`
-- `actions:write`
-- `security:read`
-- `admin:write`
-
-If you want the built-in GitHub mapping:
+The `StaticPolicy` in the SDK is a **local defense-in-depth fallback**, not the primary authorization model. It provides a safety net at the MCP boundary so that even if AuthSec is unreachable or misconfigured, the server enforces minimum scope requirements locally.
 
 ```go
-Policy: authsecsdk.GitHubDefaultPolicy()
+// StaticPolicy is a LOCAL defense-in-depth fallback.
+// The authoritative scope→tool mapping lives in AuthSec (Scope Matrix).
+// This ensures the server enforces minimum scope requirements even if
+// AuthSec is unreachable.
+Policy: authsecsdk.StaticPolicy{
+	"list_issues":  {AnyOfScopes: []string{"issues:read"}},
+	"create_issue": {AnyOfScopes: []string{"issues:write"}},
+}
 ```
 
-If you want to override or extend specific tools:
+If you want to override or extend a base policy:
 
 ```go
-policy := authsecsdk.OverrideToolPolicy(
-	authsecsdk.GitHubDefaultPolicy(),
-	map[string]authsecsdk.ToolRule{
-		"create_repository": {
-			AnyOfScopes: []string{"admin:write"},
-		},
+basePolicy := authsecsdk.StaticPolicy{
+	"list_issues":  {AnyOfScopes: []string{"issues:read"}},
+	"create_issue": {AnyOfScopes: []string{"issues:write"}},
+}
+
+// Add local overrides on top of the base policy
+policy := authsecsdk.OverrideToolPolicy(basePolicy, map[string]authsecsdk.ToolRule{
+	"create_repository": {
+		AnyOfScopes: []string{"admin:write"},
 	},
-)
+})
 ```
 
 Then use:
 
 ```go
 Policy: policy
+```
+
+If you want the GitHub preset package as a convenience starter (not required):
+
+```go
+import (
+	authsecsdk "github.com/authsec-ai/sdk-authsec/packages/go-sdk"
+	githubpreset "github.com/authsec-ai/sdk-authsec/packages/go-sdk/presets/github"
+)
+
+policy := githubpreset.DefaultPolicy()
 ```
 
 ## Step 5: Keep upstream credentials separate
@@ -390,7 +403,69 @@ That separation matters because:
 
 Those are different concerns and should remain separate.
 
-## Step 6: Point MCP clients at your server
+AuthSec manages consent grants. The MCP server never stores consent state. Consent can be viewed, managed, and revoked in the AuthSec console under **Consent Grants** (accessible from Authz / RBAC in the sidebar).
+
+## Step 6: Configure scopes and RBAC in AuthSec
+
+This is the critical step that connects your resource server to the full AuthSec authorization model. All of this happens in the AuthSec console — the MCP server itself does not need changes.
+
+### 1. Scopes: auto-discover and map tools
+
+Navigate to **Resource Servers** → select your RS → **Scope Matrix**.
+
+AuthSec auto-discovers your MCP tools by calling `tools/list` on your resource server. Click **Rescan** to trigger discovery. The Scope Matrix shows a grid of tools × scopes:
+
+- Each row is a discovered MCP tool
+- Each column pill is an OAuth scope mapped to that tool
+- `auto_matched` scopes are shown with an indicator
+- Click a scope pill to edit its metadata (display name, description, risk level)
+- Use the **Map Scope** dropdown per tool to assign or remove scopes
+
+You can also create custom scopes from this page if the auto-discovered set is insufficient.
+
+### 2. Permissions: create resource:action pairs
+
+Navigate to **Authz / RBAC** → **Permissions**.
+
+Create permissions that represent fine-grained actions, for example:
+
+- `github:issues:read`
+- `github:repos:write`
+
+### 3. Roles: group permissions into roles
+
+Navigate to **Authz / RBAC** → **Roles**.
+
+Create roles that bundle permissions, for example:
+
+- `github-viewer` → `github:issues:read`, `github:repos:read`
+- `github-admin` → all permissions
+
+### 4. Role Bindings: assign roles to users
+
+Navigate to **Authz / RBAC** → **Role Bindings**.
+
+Bind roles to specific users. This determines what each user is allowed to do.
+
+### 5. Scope-Permission mapping: link permissions to OAuth scopes
+
+In the Scope Matrix, scopes can be linked to permissions. When a scope is granted, the associated permissions are included in the resolved access.
+
+### 6. Resolution chain
+
+When a token is issued, AuthSec resolves the effective scopes as:
+
+```
+effective_scopes = requested_scopes ∩ RS.scopes_supported ∩ user_effective_scopes
+```
+
+Where `user_effective_scopes` is derived from the user's role bindings → permissions → scope mappings.
+
+### 7. Live revocation
+
+Role removed → next introspection call → `active: false`. The MCP server's token is immediately invalidated. There is no caching delay because the SDK uses introspection against AuthSec.
+
+## Step 7: Point MCP clients at your server
 
 Once your MCP server is wrapped and deployed at:
 
@@ -411,31 +486,29 @@ This is why the SDK owns the `.well-known` protected-resource behavior.
 
 The MCP developer should not have to wire that manually.
 
-## Step 7: Manage users, scopes, and access in AuthSec
+## Step 8: Manage users and access in AuthSec
 
 After the SDK is in front of your MCP server, user and access management should move to AuthSec.
 
 In the AuthSec console, the relevant areas are:
 
-- `Users`
-  - create or manage operator identities
-- `Identity Providers`
-  - configure Google, GitHub, Microsoft, OIDC, SAML, and other upstream login methods
-- `Resource Servers`
-  - register the MCP server itself
-  - view nested OAuth clients
-  - rotate introspection secrets
-- `Authz / RBAC`
-  - define roles, permissions, bindings, and resource access policy
+- **Users** — create or manage operator identities
+- **Identity Providers** — configure Google, GitHub, Microsoft, OIDC, SAML, and other upstream login methods
+- **Resource Servers** — register the MCP server, view the Scope Matrix for tool-scope mappings, view nested OAuth clients, rotate introspection secrets
+- **Permissions** — define fine-grained resource:action pairs
+- **Roles** — group permissions into named roles
+- **Role Bindings** — assign roles to users with optional conditions
+- **Consent Grants** — view and revoke user-granted consents per client per resource server
 
 The operational model should be:
 
 - your MCP server stays thin
 - AuthSec decides who the caller is
-- AuthSec decides which scopes are granted
+- AuthSec decides which scopes are granted (via RBAC resolution)
 - the SDK enforces those grants at the MCP boundary
+- consent and access can be revoked in real time from the console
 
-## Step 8: Verify the integration
+## Step 9: Verify the integration
 
 ### Check the protected-resource metadata
 
@@ -473,6 +546,29 @@ With a valid AuthSec token that lacks write scopes:
 
 - `tools/list` should hide write tools
 - `tools/call` for a write tool should fail with `insufficient_scope`
+
+### Verify RBAC end-to-end
+
+1. Create a permission (e.g., `github:issues:read`)
+2. Create a role that includes that permission
+3. Create a role binding assigning the role to a user
+4. Map the permission to an OAuth scope in the Scope Matrix
+5. Obtain a token for that user — verify the token includes the expected scope
+6. Remove the role binding
+7. Call introspect — verify the token returns `active: false`
+
+### Verify consent management
+
+1. Authorize a client against your resource server
+2. Check the consent grant appears in the AuthSec console under **Consent Grants**
+3. Revoke the consent grant from the console
+4. Verify the client is re-prompted for authorization on next access
+
+### Verify tool filtering with RBAC
+
+1. Obtain a token with limited scopes (e.g., only `issues:read`)
+2. Call `tools/list` — verify only tools mapped to `issues:read` are visible
+3. Call `tools/call` on an unauthorized tool (e.g., one requiring `admin:write`) — verify the SDK returns `insufficient_scope`
 
 ## Example development configuration
 
