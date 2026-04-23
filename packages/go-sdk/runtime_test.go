@@ -6,10 +6,13 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,6 +121,98 @@ func TestWrapMCPHTTP_BlocksUnauthorizedToolCall(t *testing.T) {
 	}
 }
 
+func TestWrapMCPHTTP_NoToolScopes_AllowsAll(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+	// Clear tool scopes — should allow all tools
+	cfg.ToolScopes = nil
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"list_issues"},{"name":"create_issue"}]}}`))
+	})
+
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	// tools/list should return ALL tools when no mapping is configured
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "list_issues") {
+		t.Fatalf("expected list_issues to remain visible")
+	}
+	if !strings.Contains(rec.Body.String(), "create_issue") {
+		t.Fatalf("expected create_issue to remain visible (no filtering)")
+	}
+
+	// tools/call should also allow any tool
+	req2 := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_issue"}}`))
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 when no tool scopes configured, got %d", rec2.Code)
+	}
+}
+
+func TestWrapMCPHTTP_RemoteScopeMatrix(t *testing.T) {
+	// Mock scope matrix endpoint
+	scopeMatrixServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "rs-1" || pass != "secret-1" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tools": map[string][]string{
+				"list_issues":  {"issues:read"},
+				"create_issue": {"issues:write"},
+			},
+			"fetched_at":  "2026-04-16T00:00:00Z",
+			"ttl_seconds": 300,
+		})
+	}))
+	defer scopeMatrixServer.Close()
+
+	cfg, token, cleanup := testConfigWithScopeMatrix(t, scopeMatrixServer.URL)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"list_issues"},{"name":"create_issue"}]}}`))
+	})
+
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	// Token has scope "issues:read" — should filter out create_issue
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "list_issues") {
+		t.Fatalf("expected read tool to remain visible")
+	}
+	if strings.Contains(rec.Body.String(), "create_issue") {
+		t.Fatalf("expected write tool to be filtered out via remote scope matrix")
+	}
+}
+
 func TestAuthMiddleware_HydratesPrincipal(t *testing.T) {
 	cfg, token, cleanup := testConfig(t)
 	defer cleanup()
@@ -148,6 +243,7 @@ func TestAuthMiddleware_HydratesPrincipal(t *testing.T) {
 	}
 }
 
+// testConfig creates a test config with LOCAL ToolScopes (no remote fetch).
 func testConfig(t *testing.T) (Config, string, func()) {
 	t.Helper()
 
@@ -203,10 +299,75 @@ func testConfig(t *testing.T) (Config, string, func()) {
 		ResourceURI:               "https://mcp.example.com/mcp",
 		ResourceName:              "GitHub MCP Server",
 		SupportedScopes:           []string{"issues:read", "issues:write"},
-		Policy: StaticPolicy{
-			"list_issues":  {AnyOfScopes: []string{"issues:read"}},
-			"create_issue": {AnyOfScopes: []string{"issues:write"}},
+		ToolScopes: ToolScopeMap{
+			"list_issues":  {"issues:read"},
+			"create_issue": {"issues:write"},
 		},
+	}
+
+	return cfg, token, func() {
+		jwksServer.Close()
+		introspectionServer.Close()
+	}
+}
+
+// testConfigWithScopeMatrix creates a test config that uses remote scope matrix fetch.
+func testConfigWithScopeMatrix(t *testing.T, scopeMatrixBaseURL string) (Config, string, func()) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]any{{
+				"kty": "RSA",
+				"kid": "test-kid",
+				"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+			}},
+		})
+	}))
+
+	introspectionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if gotUser, gotPass, _ := r.BasicAuth(); gotUser != "rs-1" || gotPass != "secret-1" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active": true,
+			"sub":    "user-123",
+			"iss":    "https://issuer.example.com",
+			"aud":    []string{"https://mcp.example.com/mcp"},
+			"scope":  "issues:read",
+		})
+	}))
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss":   "https://issuer.example.com",
+		"sub":   "user-123",
+		"aud":   []string{"https://mcp.example.com/mcp"},
+		"scope": "issues:read",
+		"exp":   time.Now().Add(1 * time.Hour).Unix(),
+	}).SignedString(key)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+
+	cfg := Config{
+		Issuer:                    "https://issuer.example.com",
+		AuthorizationServer:       scopeMatrixBaseURL, // points to mock scope matrix
+		JWKSURL:                   jwksServer.URL,
+		IntrospectionURL:          introspectionServer.URL,
+		IntrospectionClientID:     "rs-1",
+		IntrospectionClientSecret: "secret-1",
+		ResourceURI:               "https://mcp.example.com/mcp",
+		ResourceName:              "GitHub MCP Server",
+		ResourceServerID:          "test-rs-id",
+		SupportedScopes:           []string{"issues:read", "issues:write"},
 	}
 
 	return cfg, token, func() {
@@ -220,5 +381,460 @@ func TestPrincipalFromContext(t *testing.T) {
 	principal, ok := PrincipalFromContext(ctx)
 	if !ok || principal.Subject != "abc" {
 		t.Fatalf("expected principal in context")
+	}
+}
+
+// ── NEW TESTS ────────────────────────────────────────────────────────────────
+
+// Test 1: MountMCP registers the correct metadata route(s).
+func TestMountMCP_RegistersMetadataRoute(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+	// cfg.ResourceURI = "https://mcp.example.com/mcp" (path-based resource)
+
+	mux := http.NewServeMux()
+	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if err := MountMCP(mux, "/mcp", mcpHandler, cfg); err != nil {
+		t.Fatalf("MountMCP() error = %v", err)
+	}
+
+	// Path-based resource: alias (/.well-known/oauth-protected-resource/mcp) must return 200.
+	aliasPath := BuildResourceMetadataPath(cfg.ResourceURI) // /.well-known/oauth-protected-resource/mcp
+	req := httptest.NewRequest(http.MethodGet, aliasPath, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected alias metadata path %s → 200, got %d", aliasPath, rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), cfg.AuthorizationServer) {
+		t.Fatalf("expected authorization server in metadata body")
+	}
+
+	// Bare /.well-known/oauth-protected-resource must return 404 for path-based resources
+	// (not registered — this is correct per the alias-only contract).
+	req2 := httptest.NewRequest(http.MethodGet, protectedResourcePrefix, nil)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("expected bare metadata path → 404 for path-based resource, got %d", rec2.Code)
+	}
+
+	// MCP route without auth must 401.
+	req3 := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	rec3 := httptest.NewRecorder()
+	mux.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 from MCP route without auth, got %d", rec3.Code)
+	}
+
+	// Sub-test: root resource — bare path and alias are the same, both should 200.
+	t.Run("root resource", func(t *testing.T) {
+		rootCfg, _, rootCleanup := testConfigRoot(t)
+		defer rootCleanup()
+
+		rootMux := http.NewServeMux()
+		if err := MountMCP(rootMux, "/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}), rootCfg); err != nil {
+			t.Fatalf("MountMCP() root error = %v", err)
+		}
+
+		rootMeta := BuildResourceMetadataPath(rootCfg.ResourceURI) // /.well-known/oauth-protected-resource
+		if rootMeta != protectedResourcePrefix {
+			t.Fatalf("expected root resource alias == bare path, got %q", rootMeta)
+		}
+		req := httptest.NewRequest(http.MethodGet, rootMeta, nil)
+		rec := httptest.NewRecorder()
+		rootMux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected root metadata 200, got %d", rec.Code)
+		}
+	})
+}
+
+// Test 2: Unknown tool is denied when policy exists.
+func TestAuthorizeTool_UnknownToolDenied_WhenPolicyExists(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+	// cfg.ToolScopes has list_issues and create_issue only → PolicyModeLocalOnly.
+	// "unknown_tool" is not in the map → must be denied.
+
+	handler, err := WrapMCPHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"unknown_tool"}}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unknown tool, got %d", rec.Code)
+	}
+}
+
+// Test 3: Batch with one unauthorized call → 403 for entire batch.
+func TestWrapMCPHTTP_BatchDeniesUnauthorizedTool(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+
+	handler, err := WrapMCPHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	// Token has issues:read; create_issue requires issues:write → denied.
+	body := `[
+		{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_issues"}},
+		{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_issue"}}
+	]`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for batch with unauthorized tool, got %d", rec.Code)
+	}
+}
+
+// Test 4: Batch where all calls are allowed → 200.
+func TestWrapMCPHTTP_BatchAllAllowed(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	// Token has issues:read; list_issues requires issues:read → allowed.
+	body := `[
+		{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_issues"}}
+	]`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for allowed batch, got %d", rec.Code)
+	}
+}
+
+// Test 5: Non-JSON body with valid auth → 400 (fail-closed).
+func TestWrapMCPHTTP_ParseMissFailsClosed(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+
+	handler, err := WrapMCPHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`not valid json at all`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unparseable body, got %d", rec.Code)
+	}
+}
+
+// Test 6: 50 concurrent GetCached calls after expiry → exactly 1 HTTP fetch.
+func TestScopeMatrixClient_CASDedup(t *testing.T) {
+	var fetchCount int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&fetchCount, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tools": map[string][]string{
+				"list_issues": {"issues:read"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := &ScopeMatrixClient{
+		endpoint:     server.URL + "/authsec/resource-servers/rs-test/sdk-policy",
+		clientID:     "client",
+		clientSecret: "secret",
+		httpClient:   &http.Client{Timeout: 5 * time.Second},
+		ttl:          1 * time.Millisecond,
+		maxStaleAge:  defaultMaxStaleAge,
+		retryBackoff: defaultRetryBackoff,
+	}
+
+	// Seed cache with a successful fetch.
+	if err := client.FetchAndCache(context.Background()); err != nil {
+		t.Fatalf("initial fetch: %v", err)
+	}
+	atomic.StoreInt64(&fetchCount, 0) // reset counter
+
+	// Let cache expire.
+	time.Sleep(5 * time.Millisecond)
+
+	// Fire 50 concurrent GetCached calls.
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = client.GetCached(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	// Wait for the single background goroutine to finish.
+	time.Sleep(200 * time.Millisecond)
+
+	got := atomic.LoadInt64(&fetchCount)
+	if got != 1 {
+		t.Fatalf("expected exactly 1 HTTP fetch during burst, got %d", got)
+	}
+}
+
+// Test 7: JWT failure cannot be rescued by introspection in JWTAndIntrospect mode.
+func TestValidator_JWTFailureNotRescuedByIntrospection(t *testing.T) {
+	key1, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey key1: %v", err)
+	}
+	key2, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey key2: %v", err)
+	}
+
+	// JWKS server serves key1's public key.
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]any{{
+				"kty": "RSA",
+				"kid": "k1",
+				"n":   base64.RawURLEncoding.EncodeToString(key1.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key1.E)).Bytes()),
+			}},
+		})
+	}))
+	defer jwksServer.Close()
+
+	// Introspection server says token is active (would rescue under old behavior).
+	introspectionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active": true,
+			"sub":    "user-123",
+			"iss":    "https://issuer.example.com",
+			"aud":    []string{"https://mcp.example.com/mcp"},
+			"scope":  "issues:read",
+		})
+	}))
+	defer introspectionServer.Close()
+
+	cfg := Config{
+		Issuer:                    "https://issuer.example.com",
+		JWKSURL:                   jwksServer.URL,
+		IntrospectionURL:          introspectionServer.URL,
+		IntrospectionClientID:     "rs-1",
+		IntrospectionClientSecret: "secret-1",
+		ResourceURI:               "https://mcp.example.com/mcp",
+		// ValidationMode defaults to ValidationModeJWTAndIntrospect when both URLs set.
+	}
+
+	// Sign the token with key2 — JWKS has key1, so JWT verification must fail.
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss": "https://issuer.example.com",
+		"sub": "user-123",
+		"aud": []string{"https://mcp.example.com/mcp"},
+		"exp": time.Now().Add(1 * time.Hour).Unix(),
+	}).SignedString(key2)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+
+	v, err := NewHybridValidator(cfg)
+	if err != nil {
+		t.Fatalf("NewHybridValidator() error = %v", err)
+	}
+
+	_, err = v.Validate(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected validation to fail: JWT signed with wrong key should not be rescued by introspection in JWTAndIntrospect mode")
+	}
+}
+
+// Test 8: PolicyModeRemoteRequired fails startup without ResourceServerID.
+func TestNewRuntime_PolicyModeRemoteRequired_FailsWithoutResourceServerID(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]any{{
+				"kty": "RSA", "kid": "k1",
+				"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+			}},
+		})
+	}))
+	defer jwksServer.Close()
+
+	cfg := Config{
+		Issuer:      "https://issuer.example.com",
+		JWKSURL:     jwksServer.URL,
+		ResourceURI: "https://mcp.example.com/mcp",
+		PolicyMode:  PolicyModeRemoteRequired,
+		// ResourceServerID intentionally missing.
+	}
+
+	_, err = NewRuntime(cfg)
+	if err == nil {
+		t.Fatal("expected NewRuntime to fail: PolicyModeRemoteRequired requires ResourceServerID")
+	}
+}
+
+// Test 9: Policy unavailable (degraded cache past maxStaleAge) → 503, not 403.
+func TestWrapMCPHTTP_PolicyUnavailable_Returns503(t *testing.T) {
+	// Scope matrix server for initial successful fetch.
+	scopeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tools": map[string][]string{
+				"list_issues":  {"issues:read"},
+				"create_issue": {"issues:write"},
+			},
+		})
+	}))
+	defer scopeServer.Close()
+
+	// Build a scope matrix client and seed it with a successful fetch.
+	client := &ScopeMatrixClient{
+		endpoint:     scopeServer.URL + "/authsec/resource-servers/rs-test/sdk-policy",
+		clientID:     "client",
+		clientSecret: "secret",
+		httpClient:   &http.Client{Timeout: 5 * time.Second},
+		ttl:          defaultScopeMatrixTTL,
+		maxStaleAge:  defaultMaxStaleAge,
+		retryBackoff: defaultRetryBackoff,
+	}
+	if err := client.FetchAndCache(context.Background()); err != nil {
+		t.Fatalf("seed fetch: %v", err)
+	}
+
+	// Simulate post-start degradation: fetchedAt is older than maxStaleAge,
+	// and last refresh errored (e.g. network failure after startup).
+	client.mu.Lock()
+	client.fetchedAt = time.Now().Add(-(defaultMaxStaleAge + 1*time.Second))
+	client.lastErr = errors.New("simulated persistent refresh failure")
+	client.lastErrAt = time.Now()
+	client.mu.Unlock()
+
+	// Build a valid config and runtime for token validation.
+	// Use the original testConfig (ToolScopes-based) for the validator — it passes validation.
+	// Then override policyMode on the runtime to RemoteRequired so the scope matrix client is used.
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+
+	validator, valErr := NewHybridValidator(cfg)
+	if valErr != nil {
+		t.Fatalf("NewHybridValidator: %v", valErr)
+	}
+
+	rt := &Runtime{
+		cfg:         cfg.normalized(),
+		policyMode:  PolicyModeRemoteRequired,
+		scopeMatrix: client,
+		validator:   validator,
+	}
+
+	handler := rt.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_issues"}}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for policy-unavailable (degraded cache), got %d", rec.Code)
+	}
+}
+
+// testConfigRoot creates a test config for a ROOT resource (no path component in ResourceURI).
+// Used for MountMCP root-resource sub-test.
+func testConfigRoot(t *testing.T) (Config, string, func()) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]any{{
+				"kty": "RSA",
+				"kid": "test-kid",
+				"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+			}},
+		})
+	}))
+
+	introspectionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active": true,
+			"sub":    "user-123",
+			"iss":    "https://issuer.example.com",
+			"aud":    []string{"https://mcp.example.com"},
+			"scope":  "issues:read",
+		})
+	}))
+
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss":   "https://issuer.example.com",
+		"sub":   "user-123",
+		"aud":   []string{"https://mcp.example.com"},
+		"scope": "issues:read",
+		"exp":   time.Now().Add(1 * time.Hour).Unix(),
+	}).SignedString(key)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+
+	cfg := Config{
+		Issuer:                    "https://issuer.example.com",
+		AuthorizationServer:       "https://issuer.example.com",
+		JWKSURL:                   jwksServer.URL,
+		IntrospectionURL:          introspectionServer.URL,
+		IntrospectionClientID:     "rs-1",
+		IntrospectionClientSecret: "secret-1",
+		ResourceURI:               "https://mcp.example.com", // root: no path
+		ResourceName:              "Root MCP Server",
+		ToolScopes: ToolScopeMap{
+			"list_issues": {"issues:read"},
+		},
+	}
+
+	return cfg, token, func() {
+		jwksServer.Close()
+		introspectionServer.Close()
 	}
 }

@@ -2,58 +2,79 @@ package authsec
 
 import "strings"
 
-// ToolPolicy determines the scope requirements for each MCP tool.
-type ToolPolicy interface {
-	RuleFor(toolName string) ToolRule
-}
+// ToolScopeMap maps MCP tool names to their required OAuth scopes.
+//
+// The authoritative tool→scope mapping lives in AuthSec's Scope Matrix UI.
+// When ResourceServerID is set in Config, the SDK fetches this mapping from
+// AuthSec at startup and refreshes it periodically. The developer does not
+// need to maintain tool→scope mappings in code.
+//
+// ToolScopeMap can also be set directly via Config.ToolScopes as a local
+// defense-in-depth fallback. When set, it is used if the remote fetch fails.
+// When both remote and local are nil, no tool-level filtering is applied
+// (all tools are allowed for any valid token).
+//
+// An explicit empty slice entry marks a tool as public (allowed for any valid token):
+//
+//	ToolScopeMap{"public_tool": {}}
+//
+// A tool absent from the map is denied when any non-Open policy mode is active.
+type ToolScopeMap map[string][]string
 
-// ToolRule specifies the scope requirements for a single tool.
-type ToolRule struct {
-	AnyOfScopes []string
-}
+// ToolPolicyResult is the three-state outcome of LookupTool.
+type ToolPolicyResult int
 
-// StaticPolicy is a local defense-in-depth fallback that maps tool names to
-// scope requirements. The authoritative scope→tool mapping lives in AuthSec
-// (Scope Matrix UI). StaticPolicy ensures the MCP server enforces minimum
-// scope requirements even if AuthSec is unreachable or misconfigured.
-type StaticPolicy map[string]ToolRule
+const (
+	// ToolPolicyAbsent means the tool has no entry in the map.
+	// When a non-Open policy mode is active, absent tools are denied.
+	ToolPolicyAbsent ToolPolicyResult = iota
 
-func (p StaticPolicy) RuleFor(toolName string) ToolRule {
-	if rule, ok := p[toolName]; ok {
-		return rule
+	// ToolPolicyPublic means the tool has an explicit empty-slice entry.
+	// It is allowed for any valid authenticated token, regardless of scopes.
+	ToolPolicyPublic
+
+	// ToolPolicyScoped means the tool requires at least one specific scope.
+	ToolPolicyScoped
+)
+
+// LookupTool returns the policy result and required scopes for a tool.
+// Use this instead of RequiredScopes when deny-by-default is needed.
+func (m ToolScopeMap) LookupTool(toolName string) (ToolPolicyResult, []string) {
+	if m == nil {
+		return ToolPolicyAbsent, nil
 	}
-	return ToolRule{}
-}
-
-type allowAllPolicy struct{}
-
-func (allowAllPolicy) RuleFor(string) ToolRule { return ToolRule{} }
-
-func AllowAllPolicy() ToolPolicy { return allowAllPolicy{} }
-
-func OverrideToolPolicy(base ToolPolicy, overrides map[string]ToolRule) ToolPolicy {
-	if base == nil {
-		base = AllowAllPolicy()
+	name := strings.TrimSpace(toolName)
+	scopes, present := m[name]
+	if !present {
+		return ToolPolicyAbsent, nil
 	}
-	return overridePolicy{base: base, overrides: overrides}
-}
-
-type overridePolicy struct {
-	base      ToolPolicy
-	overrides map[string]ToolRule
-}
-
-func (p overridePolicy) RuleFor(toolName string) ToolRule {
-	if rule, ok := p.overrides[toolName]; ok {
-		return rule
+	if len(scopes) == 0 {
+		return ToolPolicyPublic, nil
 	}
-	return p.base.RuleFor(toolName)
+	return ToolPolicyScoped, scopes
 }
 
-func RequiredScopesForTool(policy ToolPolicy, toolName string) []string {
-	if policy == nil {
+// RequiredScopes returns the scopes required for a tool.
+// Returns nil if the tool has no mapping (tool is allowed for any valid token).
+// Deprecated: prefer LookupTool for deny-by-default semantics.
+func (m ToolScopeMap) RequiredScopes(toolName string) []string {
+	if m == nil {
 		return nil
 	}
-	rule := policy.RuleFor(strings.TrimSpace(toolName))
-	return append([]string(nil), rule.AnyOfScopes...)
+	return m[strings.TrimSpace(toolName)]
+}
+
+// HasAnyRequired checks whether a principal with the given granted scopes
+// satisfies the scope requirement for the named tool.
+func (m ToolScopeMap) HasAnyRequired(toolName string, granted map[string]struct{}) bool {
+	required := m.RequiredScopes(toolName)
+	if len(required) == 0 {
+		return true // no requirement → allowed
+	}
+	for _, scope := range required {
+		if _, ok := granted[scope]; ok {
+			return true
+		}
+	}
+	return false
 }

@@ -25,6 +25,11 @@ func ProtectedResourceHandler(cfg Config) (http.Handler, error) {
 	return rt.ProtectedResourceHandler(), nil
 }
 
+// BuildResourceMetadataPath returns the RFC 9728 metadata path for the given resource URI.
+//
+// For root resources (no path component), this returns /.well-known/oauth-protected-resource.
+// For path-based resources (e.g. https://mcp.example.com/mcp), this returns
+// /.well-known/oauth-protected-resource/mcp.
 func BuildResourceMetadataPath(resourceURI string) string {
 	u, err := url.Parse(resourceURI)
 	if err != nil {
@@ -45,9 +50,18 @@ func BuildResourceMetadataURL(resourceURI string) string {
 	return strings.TrimRight(u.Scheme+"://"+u.Host, "/") + BuildResourceMetadataPath(resourceURI)
 }
 
+// isMetadataRequest reports whether the given path is the metadata discovery path
+// for the resource. Only the path derived from the resource URI is matched
+// (alias-only). For root resources the alias IS the bare well-known path, so
+// bare-path requests still resolve for root resources.
+//
+// Path-based resources (e.g. /mcp) only match their derived alias
+// (/.well-known/oauth-protected-resource/mcp). The bare
+// /.well-known/oauth-protected-resource path is NOT matched for path-based
+// resources — use BuildResourceMetadataPath to discover the correct path.
 func isMetadataRequest(resourceURI, path string) bool {
 	metadataPath := BuildResourceMetadataPath(resourceURI)
-	return path == protectedResourcePrefix || path == metadataPath || path == metadataPath+"/"
+	return path == metadataPath || path == metadataPath+"/"
 }
 
 func writeMetadata(w http.ResponseWriter, cfg Config) {

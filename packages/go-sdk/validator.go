@@ -20,7 +20,8 @@ type Validator interface {
 }
 
 type HybridValidator struct {
-	cfg Config
+	cfg            Config
+	validationMode ValidationMode
 
 	mu   sync.RWMutex
 	keys map[string]*rsa.PublicKey
@@ -31,10 +32,71 @@ func NewHybridValidator(cfg Config) (*HybridValidator, error) {
 	if err := n.Validate(); err != nil {
 		return nil, err
 	}
-	return &HybridValidator{cfg: n, keys: map[string]*rsa.PublicKey{}}, nil
+	return &HybridValidator{
+		cfg:            n,
+		validationMode: n.effectiveValidationMode(),
+		keys:           map[string]*rsa.PublicKey{},
+	}, nil
 }
 
+// Validate validates a token according to the configured ValidationMode.
 func (v *HybridValidator) Validate(ctx context.Context, token string) (*Principal, error) {
+	switch v.validationMode {
+	case ValidationModeJWTOnly:
+		p, err := v.validateJWT(ctx, token)
+		if err != nil {
+			return nil, err
+		}
+		return v.checkActive(p)
+	case ValidationModeIntrospectionOnly:
+		p, err := v.introspect(ctx, token)
+		if err != nil {
+			return nil, err
+		}
+		return v.checkActive(p)
+	case ValidationModeJWTAndIntrospect:
+		return v.validateJWTAndIntrospect(ctx, token)
+	case ValidationModeJWTOrIntrospect:
+		return v.validateJWTOrIntrospect(ctx, token)
+	default:
+		return v.validateJWTAndIntrospect(ctx, token)
+	}
+}
+
+// validateJWTAndIntrospect is the strict combined mode.
+//
+// For JWT-shaped tokens: JWT must pass local verification first; introspection
+// failure is also terminal. Introspection cannot rescue a JWT that failed locally.
+//
+// For opaque (non-JWT) tokens: introspection is used directly.
+func (v *HybridValidator) validateJWTAndIntrospect(ctx context.Context, token string) (*Principal, error) {
+	isJWT := strings.Count(token, ".") == 2
+
+	if isJWT {
+		// JWT-shaped token: local verification must pass first.
+		jwtPrincipal, err := v.validateJWT(ctx, token)
+		if err != nil {
+			// Terminal: do NOT fall through to introspection.
+			return nil, fmt.Errorf("jwt verification failed: %w", err)
+		}
+		// Introspection adds revocation check on top of a locally-verified JWT.
+		introspected, err := v.introspect(ctx, token)
+		if err != nil {
+			return nil, fmt.Errorf("introspection check failed: %w", err)
+		}
+		return v.mergePrincipals(jwtPrincipal, introspected)
+	}
+
+	// Opaque token: go straight to introspection.
+	p, err := v.introspect(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	return v.checkActive(p)
+}
+
+// validateJWTOrIntrospect is the permissive legacy mode: either path may succeed.
+func (v *HybridValidator) validateJWTOrIntrospect(ctx context.Context, token string) (*Principal, error) {
 	var jwtPrincipal *Principal
 	var jwtErr error
 
@@ -48,23 +110,7 @@ func (v *HybridValidator) Validate(ctx context.Context, token string) (*Principa
 			return nil, err
 		}
 		if introspected != nil {
-			if jwtPrincipal != nil && introspected.Subject != "" && jwtPrincipal.Subject != "" && introspected.Subject != jwtPrincipal.Subject {
-				return nil, fmt.Errorf("jwt subject and introspection subject mismatch")
-			}
-			if jwtPrincipal == nil {
-				jwtPrincipal = introspected
-			} else {
-				jwtPrincipal.Active = introspected.Active
-				if len(introspected.Scopes) > 0 {
-					jwtPrincipal.Scopes = introspected.Scopes
-				}
-				if len(introspected.Audience) > 0 {
-					jwtPrincipal.Audience = introspected.Audience
-				}
-				for k, val := range introspected.Claims {
-					jwtPrincipal.Claims[k] = val
-				}
-			}
+			return v.mergePrincipals(jwtPrincipal, introspected)
 		}
 	}
 
@@ -75,17 +121,58 @@ func (v *HybridValidator) Validate(ctx context.Context, token string) (*Principa
 		return nil, fmt.Errorf("token validation failed")
 	}
 
-	if !jwtPrincipal.Active {
+	return v.checkActive(jwtPrincipal)
+}
+
+// checkActive verifies that a principal is active and the token audience includes
+// the configured resource URI.
+func (v *HybridValidator) checkActive(principal *Principal) (*Principal, error) {
+	if principal == nil {
+		return nil, fmt.Errorf("token validation returned nil principal")
+	}
+	if !principal.Active {
 		return nil, fmt.Errorf("token is not active")
 	}
-
-	if !contains(jwtPrincipal.Audience, v.cfg.ResourceURI) {
-		if resource, ok := jwtPrincipal.Claims["resource"].(string); !ok || resource != v.cfg.ResourceURI {
+	if !contains(principal.Audience, v.cfg.ResourceURI) {
+		if resource, ok := principal.Claims["resource"].(string); !ok || resource != v.cfg.ResourceURI {
 			return nil, fmt.Errorf("token audience does not include resource URI")
 		}
 	}
+	return principal, nil
+}
 
-	return jwtPrincipal, nil
+// mergePrincipals merges an introspection result into a JWT principal.
+// Introspection is authoritative for active, scopes, and audience.
+func (v *HybridValidator) mergePrincipals(jwtP *Principal, introspected *Principal) (*Principal, error) {
+	if introspected == nil {
+		if jwtP != nil {
+			return v.checkActive(jwtP)
+		}
+		return nil, fmt.Errorf("token validation failed")
+	}
+
+	if jwtP == nil {
+		return v.checkActive(introspected)
+	}
+
+	// Verify subject consistency.
+	if introspected.Subject != "" && jwtP.Subject != "" && introspected.Subject != jwtP.Subject {
+		return nil, fmt.Errorf("jwt subject and introspection subject mismatch")
+	}
+
+	// Introspection is authoritative for active, scopes, audience.
+	jwtP.Active = introspected.Active
+	if len(introspected.Scopes) > 0 {
+		jwtP.Scopes = introspected.Scopes
+	}
+	if len(introspected.Audience) > 0 {
+		jwtP.Audience = introspected.Audience
+	}
+	for k, val := range introspected.Claims {
+		jwtP.Claims[k] = val
+	}
+
+	return v.checkActive(jwtP)
 }
 
 func (v *HybridValidator) validateJWT(ctx context.Context, token string) (*Principal, error) {
@@ -217,6 +304,13 @@ func (v *HybridValidator) introspect(ctx context.Context, token string) (*Princi
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Non-2xx responses are backend failures, not token rejections.
+	// A 401 means bad SDK credentials; a 500 means a server error.
+	// Either way, treating the body as an inactive token would mask the real problem.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("introspection endpoint returned HTTP %d", resp.StatusCode)
+	}
 
 	var payload map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
