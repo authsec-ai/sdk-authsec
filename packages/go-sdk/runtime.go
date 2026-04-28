@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // ErrPolicyUnavailable is returned by AuthorizeTool when the policy backend
@@ -43,10 +44,11 @@ func (e ErrInsufficientScope) Error() string {
 
 // Runtime is the core enforcement engine.
 type Runtime struct {
-	cfg         Config
-	validator   Validator
-	scopeMatrix *ScopeMatrixClient // nil if no remote policy needed
-	policyMode  PolicyMode
+	cfg              Config
+	validator        Validator
+	scopeMatrix      *ScopeMatrixClient // nil if no remote policy needed
+	policyMode       PolicyMode
+	publishOnce      sync.Once          // guards idempotent manifest publish in Wrap
 }
 
 // NewRuntime constructs and validates a Runtime. For PolicyModeRemoteRequired,
@@ -85,6 +87,17 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 
 	fetchErr := client.FetchAndCache(context.Background())
 	if fetchErr != nil {
+		// When PublishManifest=true, a brand-new RS may not have a ready policy yet.
+		// Non-fatal: runtime starts in deny-all; background refresh loop will flip it
+		// when state=ready arrives. This lets NewRuntime succeed before the admin has
+		// activated the RS in the wizard.
+		if rt.cfg.PublishManifest {
+			n.Logger.Warn("initial scope matrix fetch failed; starting in deny-all mode (PublishManifest=true — policy will refresh when RS is activated)",
+				"error", fetchErr,
+				"resource_server_id", n.ResourceServerID,
+			)
+			return rt, nil
+		}
 		if rt.policyMode == PolicyModeRemoteRequired {
 			return nil, fmt.Errorf("PolicyModeRemoteRequired: initial scope matrix fetch failed: %w", fetchErr)
 		}
@@ -101,11 +114,17 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 // WrapMCPHTTP wraps an existing MCP HTTP handler with AuthSec enforcement.
 // The caller is responsible for also mounting ProtectedResourceHandler at
 // BuildResourceMetadataPath(cfg.ResourceURI). Use MountMCP to do both at once.
+//
+// If cfg.PublishManifest is true, this also kicks off a background manifest
+// publish using `next` (the un-wrapped handler) for synthetic tools/list.
+// Failure is logged via cfg.Logger and never propagated to the caller —
+// manifest publish is one-way push for admin visibility, not enforcement.
 func WrapMCPHTTP(next http.Handler, cfg Config) (http.Handler, error) {
 	rt, err := NewRuntime(cfg)
 	if err != nil {
 		return nil, err
 	}
+	rt.maybePublishManifest(next)
 	return rt.Wrap(next), nil
 }
 
@@ -135,9 +154,43 @@ func MountMCP(mux *http.ServeMux, pattern string, handler http.Handler, cfg Conf
 	if err != nil {
 		return err
 	}
+	rt.maybePublishManifest(handler)
 	mux.Handle(BuildResourceMetadataPath(cfg.ResourceURI), rt.ProtectedResourceHandler())
 	mux.Handle(pattern, rt.Wrap(handler))
 	return nil
+}
+
+// maybePublishManifest kicks off PublishManifest in a goroutine when
+// cfg.PublishManifest is true. Guarded by publishOnce so it runs at most once
+// per Runtime instance regardless of how many times Wrap is called. Errors are
+// logged via cfg.Logger and never returned — manifest publish must never block startup.
+//
+// `inner` is the un-wrapped MCP handler. The synthetic tools/list call goes
+// through it directly so we don't have to construct a privileged token.
+func (rt *Runtime) maybePublishManifest(inner http.Handler) {
+	if !rt.cfg.PublishManifest {
+		return
+	}
+	if rt.cfg.ResourceServerID == "" {
+		rt.cfg.Logger.Warn("PublishManifest is true but ResourceServerID is empty; skipping manifest publish")
+		return
+	}
+	rt.publishOnce.Do(func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), manifestPublishTimeout)
+			defer cancel()
+			if err := PublishManifest(ctx, rt.cfg, inner); err != nil {
+				rt.cfg.Logger.Warn("manifest publish failed",
+					"error", err,
+					"resource_server_id", rt.cfg.ResourceServerID,
+				)
+				return
+			}
+			rt.cfg.Logger.Info("manifest publish succeeded",
+				"resource_server_id", rt.cfg.ResourceServerID,
+			)
+		}()
+	})
 }
 
 // ProtectedResourceHandler returns the metadata handler for this runtime.

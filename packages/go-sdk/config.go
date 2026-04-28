@@ -102,6 +102,42 @@ type Config struct {
 	// When unset, defaults are inferred from JWKSURL and IntrospectionURL.
 	ValidationMode ValidationMode
 
+	// PublishManifest controls whether the SDK pushes its tool inventory to
+	// AuthSec at startup. When true, NewRuntime issues a synthetic tools/list
+	// against the wrapped MCP handler, packages the response (including MCP
+	// annotations like readOnlyHint and destructiveHint) plus any
+	// ToolScopeSuggestions into a manifest, and PUTs it to
+	// /authsec/resource-servers/<ResourceServerID>/sdk-manifest using the
+	// IntrospectionClient credentials.
+	//
+	// Failure is logged-and-ignored — manifest publish is never allowed to
+	// block startup. The runtime SDK remains fully functional whether the
+	// publish succeeded or not; manifest sync is purely a one-way push so
+	// AuthSec's admin UI can show the tool inventory and suggested scopes.
+	//
+	// Recommended setting for production: true. ResourceServerID and the
+	// introspection credentials must also be set.
+	PublishManifest bool
+
+	// ToolScopeSuggestions is an optional map from tool name to the SDK author's
+	// recommended scope set. Used only when publishing the manifest — these
+	// values populate suggested_scopes on each tool entry. Admins can override
+	// per-tool in the AuthSec UI; admin overrides are preserved across SDK
+	// restarts and manifest republishes.
+	//
+	// Distinct from ToolScopes: ToolScopes is enforced locally by the runtime
+	// SDK; ToolScopeSuggestions is admin-facing metadata only and has no
+	// runtime enforcement effect.
+	ToolScopeSuggestions map[string][]string
+
+	// ToolInventoryProvider is an optional escape hatch for manifest publishing.
+	// When set, PublishManifest skips synthetic tools/list enumeration entirely
+	// and uses this function's output as the tool inventory instead.
+	//
+	// Use this when the MCP handler requires custom auth even on initialize, uses
+	// a non-HTTP transport, or otherwise doesn't fit the synthetic enumeration path.
+	ToolInventoryProvider func() ([]ManifestTool, error)
+
 	BearerMethodsSupported []string
 	HTTPClient             *http.Client
 	Logger                 *slog.Logger

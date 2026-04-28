@@ -17,12 +17,52 @@ const (
 	defaultRetryBackoff    = 30 * time.Second
 )
 
+// toolPolicyEntry matches the per-tool entry in the `tool_policy` array.
+// This is the authoritative shape; the legacy `tools` flat map is still
+// emitted by the backend for back-compat but consumers MUST NOT infer
+// is_public from it.
+type toolPolicyEntry struct {
+	Name           string   `json:"name"`
+	IsPublic       bool     `json:"is_public"`
+	RequiredScopes []string `json:"required_scopes"`
+}
+
 // sdkPolicyResponse matches the JSON returned by
 // GET /authsec/resource-servers/:id/sdk-policy
+//
+// Field semantics (per the canonical contract):
+//   - State == "ready" AND PolicyComplete == true → use ToolPolicy as authoritative.
+//   - PolicyComplete == false → treat as deny-all; do NOT cache as a successful fetch.
+//     The Reason field carries the lifecycle code (rs_needs_setup, rs_scan_failed,
+//     rs_pending_scan) for observability.
+//   - Tools is the legacy flat scope-only map preserved for older SDK builds.
+//     New code MUST read ToolPolicy instead — an empty array in Tools does NOT
+//     imply public; is_public lives only on ToolPolicy.
 type sdkPolicyResponse struct {
-	Tools      map[string][]string `json:"tools"`
-	FetchedAt  string              `json:"fetched_at"`
-	TTLSeconds int                 `json:"ttl_seconds"`
+	State          string              `json:"state"`
+	PolicyComplete bool                `json:"policy_complete"`
+	Reason         string              `json:"reason"`
+	RSID           string              `json:"rs_id"`
+	Generation     int64               `json:"generation"`
+	Tools          map[string][]string `json:"tools"` // legacy back-compat
+	ToolPolicy     []toolPolicyEntry   `json:"tool_policy"`
+	FetchedAt      string              `json:"fetched_at"`
+	TTLSeconds     int                 `json:"ttl_seconds"`
+}
+
+// ErrPolicyIncomplete is returned by Fetch / FetchAndCache when the backend
+// signals policy_complete=false. Callers must treat this as deny-all and
+// must NOT fall back to a stale local cache for tool authorization.
+type ErrPolicyIncomplete struct {
+	State  string
+	Reason string
+}
+
+func (e ErrPolicyIncomplete) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("authsec policy incomplete: state=%s", e.State)
+	}
+	return fmt.Sprintf("authsec policy incomplete: state=%s reason=%s", e.State, e.Reason)
 }
 
 // CacheStatus describes the current state of the scope matrix cache.
@@ -37,6 +77,14 @@ type CacheStatus struct {
 	LastErr error
 	// LastErrAt is the timestamp of the last error; zero if LastErr is nil.
 	LastErrAt time.Time
+	// PolicyState is the last-observed RS lifecycle state ("ready", "needs_setup",
+	// "scan_failed", "pending_scan"). Empty until the first fetch attempt.
+	PolicyState string
+	// PolicyComplete is true iff the last response was a usable policy.
+	// false means the SDK is enforcing deny-all because the RS is not ready.
+	PolicyComplete bool
+	// Generation is the monotonic policy version from the last successful fetch.
+	Generation int64
 }
 
 // ScopeMatrixClient fetches and caches tool→scope mappings from AuthSec.
@@ -50,12 +98,15 @@ type ScopeMatrixClient struct {
 	maxStaleAge  time.Duration
 	retryBackoff time.Duration
 
-	mu           sync.RWMutex
-	toolMap      ToolScopeMap
-	fetchedAt    time.Time
-	lastErr      error
-	lastErrAt    time.Time
-	nextRefreshAt time.Time // earliest time a new background refresh may be attempted
+	mu             sync.RWMutex
+	toolMap        ToolScopeMap
+	fetchedAt      time.Time
+	lastErr        error
+	lastErrAt      time.Time
+	nextRefreshAt  time.Time // earliest time a new background refresh may be attempted
+	policyState    string    // last-observed lifecycle state, for observability
+	policyComplete bool      // false = deny-all enforced
+	generation     int64     // monotonic policy version
 
 	refreshing atomic.Bool // CAS gate: only one background refresh at a time
 }
@@ -95,52 +146,127 @@ func NewScopeMatrixClient(cfg Config) *ScopeMatrixClient {
 }
 
 // Fetch retrieves the tool→scope mapping from AuthSec.
-func (c *ScopeMatrixClient) Fetch(ctx context.Context) (ToolScopeMap, error) {
+//
+// Returns ErrPolicyIncomplete when the backend signals policy_complete=false.
+// The returned ToolScopeMap is nil in that case — callers must treat this
+// as deny-all. The error carries the lifecycle state for observability.
+//
+// On success, the map is built from `tool_policy` (the authoritative array),
+// not the legacy `tools` flat map:
+//   - is_public=true               → empty-slice entry (ToolPolicyPublic)
+//   - is_public=false, scopes=[a]  → ["a"] entry (ToolPolicyScoped)
+//   - is_public=false, scopes=[]   → tool OMITTED (ToolPolicyAbsent → deny)
+func (c *ScopeMatrixClient) Fetch(ctx context.Context) (ToolScopeMap, *sdkPolicyResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("scope matrix fetch: %w", err)
+		return nil, nil, fmt.Errorf("scope matrix fetch: %w", err)
 	}
 	req.SetBasicAuth(c.clientID, c.clientSecret)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("scope matrix fetch: %w", err)
+		return nil, nil, fmt.Errorf("scope matrix fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("scope matrix fetch: HTTP %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("scope matrix fetch: HTTP %d", resp.StatusCode)
 	}
 
 	var payload sdkPolicyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("scope matrix decode: %w", err)
+		return nil, nil, fmt.Errorf("scope matrix decode: %w", err)
 	}
 
-	toolMap := make(ToolScopeMap, len(payload.Tools))
-	for name, scopes := range payload.Tools {
-		toolMap[name] = scopes
+	// Back-compat shim: pre-migration backends emit the legacy shape
+	//   {"tools": {...}}
+	// without state/policy_complete/tool_policy. Treat that exact shape
+	// (no state field AND no tool_policy AND tools map populated) as a
+	// legacy ready response. New backends always set policy_complete
+	// explicitly so any half-populated response is still treated as deny-all.
+	legacyShape := payload.State == "" && len(payload.ToolPolicy) == 0 && len(payload.Tools) > 0
+	if legacyShape {
+		payload.State = "ready"
+		payload.PolicyComplete = true
 	}
-	return toolMap, nil
+
+	// Deny-all signal from backend: never produce a usable map.
+	if !payload.PolicyComplete {
+		return nil, &payload, ErrPolicyIncomplete{State: payload.State, Reason: payload.Reason}
+	}
+
+	// Build the authoritative map from tool_policy when present, otherwise
+	// fall back to the legacy `tools` map (back-compat with older backends).
+	// New code path: tool_policy carries explicit is_public.
+	// Legacy code path: tools map alone, where empty-slice means public
+	// (matches the historical ToolScopeMap encoding).
+	var toolMap ToolScopeMap
+	if len(payload.ToolPolicy) > 0 {
+		toolMap = make(ToolScopeMap, len(payload.ToolPolicy))
+		for _, t := range payload.ToolPolicy {
+			switch {
+			case t.IsPublic:
+				toolMap[t.Name] = []string{} // ToolPolicyPublic
+			case len(t.RequiredScopes) > 0:
+				toolMap[t.Name] = t.RequiredScopes // ToolPolicyScoped
+				// else: omit → ToolPolicyAbsent → deny
+			}
+		}
+	} else {
+		// Legacy: copy the flat map verbatim. Empty slice = public per the
+		// existing ToolScopeMap convention.
+		toolMap = make(ToolScopeMap, len(payload.Tools))
+		for name, scopes := range payload.Tools {
+			toolMap[name] = scopes
+		}
+	}
+	return toolMap, &payload, nil
 }
 
 // FetchAndCache fetches the mapping and stores it in the cache.
 // FetchAndCache owns all cache state updates:
-//   - On success: sets toolMap, fetchedAt; clears lastErr, lastErrAt, nextRefreshAt.
-//   - On failure: sets lastErr, lastErrAt, nextRefreshAt (retry cooldown); leaves toolMap/fetchedAt unchanged.
+//   - On success (policy_complete=true): sets toolMap, fetchedAt, generation,
+//     policyState=state, policyComplete=true; clears lastErr/lastErrAt/nextRefreshAt.
+//   - On policy_complete=false: clears toolMap so subsequent GetCached returns
+//     deny-all; records policyState/Reason; sets lastErr to ErrPolicyIncomplete
+//     so retries happen on the standard cooldown.
+//   - On transport/decode failure: sets lastErr, lastErrAt, nextRefreshAt;
+//     leaves toolMap/fetchedAt unchanged so previously-good policy keeps serving
+//     until maxStaleAge.
 func (c *ScopeMatrixClient) FetchAndCache(ctx context.Context) error {
-	toolMap, err := c.Fetch(ctx)
+	toolMap, payload, err := c.Fetch(ctx)
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err != nil {
+
+	// Transport/decode error: don't touch toolMap; let stale serving rules apply.
+	if err != nil && payload == nil {
 		c.lastErr = err
 		c.lastErrAt = now
 		c.nextRefreshAt = now.Add(c.retryBackoff)
 		return err
 	}
+
+	// Backend responded; update observability fields regardless of completeness.
+	c.policyState = payload.State
+	c.generation = payload.Generation
+
+	// Policy-incomplete: enforce deny-all by clearing the cached map.
+	// We deliberately do NOT keep the previous map — once the backend signals
+	// the RS is not ready, the SDK must stop authorizing tools immediately.
+	if err != nil {
+		c.toolMap = nil
+		c.fetchedAt = time.Time{}
+		c.policyComplete = false
+		c.lastErr = err
+		c.lastErrAt = now
+		c.nextRefreshAt = now.Add(c.retryBackoff)
+		return err
+	}
+
 	c.toolMap = toolMap
 	c.fetchedAt = now
+	c.policyComplete = true
 	c.lastErr = nil
 	c.lastErrAt = time.Time{}
 	c.nextRefreshAt = time.Time{} // zero = no cooldown; healthy fetches run on TTL schedule
@@ -194,10 +320,13 @@ func (c *ScopeMatrixClient) CacheStatus() CacheStatus {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return CacheStatus{
-		HasData:   c.toolMap != nil,
-		FetchedAt: c.fetchedAt,
-		StaleAge:  time.Since(c.fetchedAt),
-		LastErr:   c.lastErr,
-		LastErrAt: c.lastErrAt,
+		HasData:        c.toolMap != nil,
+		FetchedAt:      c.fetchedAt,
+		StaleAge:       time.Since(c.fetchedAt),
+		LastErr:        c.lastErr,
+		LastErrAt:      c.lastErrAt,
+		PolicyState:    c.policyState,
+		PolicyComplete: c.policyComplete,
+		Generation:     c.generation,
 	}
 }
