@@ -4,9 +4,9 @@ AuthSec CIBA SDK - Passwordless Authentication for Voice Clients
 Python SDK for integrating CIBA (Client-Initiated Backchannel Authentication) 
 and TOTP verification into voice clients and other applications.
 
-Supports both Admin and End-User (tenant) authentication flows:
+Supports both Admin and End-User authentication flows:
 - Admin flow: email only (original flow)
-- Tenant flow: email + client_id (multi-client architecture)
+- End-user flow: email + client_id (workspace /auth/workspace/* route surface)
 """
 
 import json
@@ -47,12 +47,12 @@ class CIBAClient:
     Python SDK for customers to integrate AuthSec into their own voice clients.
     Handles the technical execution of polling, verification, and initiation.
     
-    Supports both Admin and End-User (tenant) authentication flows:
+    Supports both Admin and End-User authentication flows:
     - Admin flow: email only (original flow)
-    - Tenant flow: email + client_id (multi-client architecture)
+    - End-user flow: email + client_id (workspace /auth/workspace/* route surface)
     
     Example usage:
-        # Initialize for tenant flow
+        # Initialize for end-user flow
         from authsec_sdk import CIBAClient
         
         client = CIBAClient(client_id="your_tenant_client_id")
@@ -75,7 +75,7 @@ class CIBAClient:
         Initialize the AuthSec SDK.
 
         Args:
-            client_id: Optional client ID for tenant/end-user flow. If provided, uses tenant endpoints.
+            client_id: Optional client ID for end-user flow. If provided, uses /auth/workspace/* endpoints.
                       If None, uses admin endpoints.
             base_url: Optional base URL override.
                       Priority: explicit param → .authsec.json → hardcoded default.
@@ -89,7 +89,7 @@ class CIBAClient:
         """
         Triggers a CIBA push notification and cancels any existing poll for this user.
         
-        - If client_id is set: uses tenant endpoint (/tenant/ciba/initiate)
+        - If client_id is set: uses end-user endpoint (/tenant/ciba/initiate)
         - If client_id is None: uses admin endpoint (/ciba/initiate)
         
         Args:
@@ -103,8 +103,8 @@ class CIBAClient:
             self.active_polls[email] = True
 
         if self.client_id:
-            # Tenant/End-User flow
-            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/initiate"
+            # End-user flow via the /auth/workspace/* route surface.
+            endpoint = f"{self.base_url}/authsec/uflow/auth/workspace/ciba/initiate"
             payload = {
                 "client_id": self.client_id,
                 "email": email,
@@ -129,7 +129,7 @@ class CIBAClient:
         """
         Verifies a TOTP code for authentication.
         
-        - If client_id is set: uses tenant endpoint (/tenant/totp/login)
+        - If client_id is set: uses end-user endpoint (/tenant/totp/login)
         - If client_id is None: uses admin endpoint (/totp/login)
         
         Args:
@@ -145,8 +145,8 @@ class CIBAClient:
             return {"success": False, "error": "too_many_retries", "remaining": 0}
 
         if self.client_id:
-            # Tenant/End-User flow
-            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/totp/login"
+            # End-user flow via the /auth/workspace/* route surface.
+            endpoint = f"{self.base_url}/authsec/uflow/auth/workspace/totp/login"
             payload = {"client_id": self.client_id, "email": email, "totp_code": code}
         else:
             # Admin flow
@@ -177,7 +177,7 @@ class CIBAClient:
         """
         Polls for CIBA approval status.
         
-        - If client_id is set: uses tenant endpoint (/tenant/ciba/token)
+        - If client_id is set: uses end-user endpoint (/tenant/ciba/token)
         - If client_id is None: uses admin endpoint (/ciba/token)
         
         Args:
@@ -192,8 +192,8 @@ class CIBAClient:
         self.active_polls[email] = False
         
         if self.client_id:
-            # Tenant/End-User flow
-            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/token"
+            # End-user flow via the /auth/workspace/* route surface.
+            endpoint = f"{self.base_url}/authsec/uflow/auth/workspace/ciba/token"
             payload = {"client_id": self.client_id, "auth_req_id": auth_req_id}
         else:
             # Admin flow
@@ -262,18 +262,28 @@ class CIBAClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def get_end_user_mfa_status(self, email, tenant_id):
+    def get_end_user_mfa_status(self, email, workspace_id=None, tenant_id=None):
         """
-        Inspects the effective MFA state for a tenant end-user.
+        Inspects the effective MFA state for an end-user in a workspace.
 
-        This is used when the legacy /uflow/user/login route only returns a bare
+        This is used when the /uflow/user/login route only returns a bare
         `mfa_required` flag without method details.
+
+        Args:
+            email: User's email address.
+            workspace_id: Canonical AuthSec workspace id.
+            tenant_id: Deprecated alias accepted for older callers; forwarded
+                as workspace_id. Will be removed in a future release.
         """
+        resolved_workspace_id = workspace_id or tenant_id
         if _is_local_base_url(self.base_url):
             endpoint = f"{self.base_url}/webauthn/mfa/loginStatus"
         else:
             endpoint = f"{self.base_url}/authsec/webauthn/mfa/loginStatus"
-        payload = {"email": email, "tenant_id": tenant_id}
+        payload = {
+            "email": email,
+            "workspace_id": resolved_workspace_id,
+        }
 
         try:
             response = requests.post(
@@ -317,7 +327,7 @@ class CIBAClient:
         - If client_id is None: uses admin endpoint (/ciba/register-device)
         """
         if self.client_id:
-            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/register-device"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/workspace/ciba/register-device"
         else:
             endpoint = f"{self.base_url}/authsec/uflow/auth/ciba/register-device"
 
@@ -346,12 +356,12 @@ class CIBAClient:
         """
         Lists pending CIBA requests for the authenticated tenant user.
 
-        Tenant flow only.
+        End-user flow only.
         """
         if not self.client_id:
             return {"success": False, "error": "tenant_flow_required"}
 
-        endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/requests"
+        endpoint = f"{self.base_url}/authsec/uflow/auth/workspace/ciba/requests"
         headers = {"Authorization": f"Bearer {jwt_token}"}
 
         try:
@@ -372,7 +382,7 @@ class CIBAClient:
         - If client_id is None: uses admin endpoint (/ciba/respond)
         """
         if self.client_id:
-            endpoint = f"{self.base_url}/authsec/uflow/auth/tenant/ciba/respond"
+            endpoint = f"{self.base_url}/authsec/uflow/auth/workspace/ciba/respond"
         else:
             endpoint = f"{self.base_url}/authsec/uflow/auth/ciba/respond"
 

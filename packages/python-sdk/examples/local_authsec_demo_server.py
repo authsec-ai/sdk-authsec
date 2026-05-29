@@ -25,7 +25,7 @@ async def demo_status(arguments, session):
         "server": "authsec-python-local-demo",
         "message": "Protected tools are available because this session is authenticated.",
         "user_id": session.user_id,
-        "tenant_id": session.tenant_id,
+        "workspace_id": session.workspace_id,
     }
     return [{"type": "text", "text": json.dumps(payload)}]
 
@@ -72,7 +72,7 @@ async def remember_note(arguments, session):
         {
             "note": note,
             "user_id": session.user_id,
-            "tenant_id": session.tenant_id,
+            "workspace_id": session.workspace_id,
         }
     )
     remember_note._notes = notes

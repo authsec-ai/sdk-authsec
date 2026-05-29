@@ -95,6 +95,41 @@ func TestWrapMCPHTTP_FiltersToolsList(t *testing.T) {
 	}
 }
 
+func TestWrapMCPHTTP_FiltersSSEToolsList(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"list_issues"},{"name":"create_issue"}]}}`))
+		_, _ = w.Write([]byte("\n\n"))
+	})
+
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "list_issues") {
+		t.Fatalf("expected read tool to remain visible")
+	}
+	if strings.Contains(rec.Body.String(), "create_issue") {
+		t.Fatalf("expected write tool to be filtered out")
+	}
+	if !strings.Contains(rec.Body.String(), "event: message") {
+		t.Fatalf("expected SSE event framing to be preserved")
+	}
+}
+
 func TestWrapMCPHTTP_BlocksUnauthorizedToolCall(t *testing.T) {
 	cfg, token, cleanup := testConfig(t)
 	defer cleanup()
@@ -210,6 +245,28 @@ func TestWrapMCPHTTP_RemoteScopeMatrix(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "create_issue") {
 		t.Fatalf("expected write tool to be filtered out via remote scope matrix")
+	}
+}
+
+func TestBuildManifestPayload_PreservesProviderSuggestedScopes(t *testing.T) {
+	payload := buildManifestPayload([]rawTool{{
+		Name:            "list_issues",
+		Description:     "List issues",
+		SuggestedScopes: []string{"issues:read"},
+	}}, map[string][]string{
+		"list_issues": {"issues:write"},
+	})
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	if !strings.Contains(string(body), `"suggested_scopes":["issues:read"]`) {
+		t.Fatalf("expected provider suggested scopes to win, got %s", string(body))
+	}
+	if strings.Contains(string(body), "issues:write") {
+		t.Fatalf("expected fallback suggestions not to override provider suggestions, got %s", string(body))
 	}
 }
 

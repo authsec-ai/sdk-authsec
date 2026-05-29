@@ -1,0 +1,20 @@
+{
+  "name": "mcp-express-example",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Minimal Express MCP server protected by AuthSec.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@authsec/sdk": "file:../..",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}

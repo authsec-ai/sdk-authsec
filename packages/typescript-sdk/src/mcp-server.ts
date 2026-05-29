@@ -16,11 +16,20 @@ import {
   setCurrentSessionId,
 } from './config.js';
 import type { ToolDefinition, McpMessage } from './types.js';
+import {
+  loadConfigFromEnv,
+  validateConfig,
+  type Config as RuntimeConfig,
+  type ManifestToolInput,
+} from './runtime/config.js';
+import type { Principal } from './runtime/principal.js';
+import { mountMCP } from './runtime/server.js';
 
 class MCPServer {
   private clientId: string;
   private appName: string;
   private userTools: Array<Record<string, any>> = [];
+  private localTools: Array<Record<string, any>> = [];
   private unprotectedTools: Array<Record<string, any>> = [];
   private toolHandlers: Map<string, (args: Record<string, any>) => Promise<any>> = new Map();
   public app: express.Express;
@@ -64,20 +73,14 @@ class MCPServer {
         }
 
         this.userTools.push(toolMetadata);
+        this.localTools.push(toolDescriptor(tool));
         this.toolHandlers.set(tool.name, tool.handler);
       } else {
         // Unprotected tool — register as standard MCP tool
-        const toolSchema: Record<string, any> = {
-          name: tool.name,
-          description: tool.description ?? `Tool: ${tool.name}`,
-          inputSchema: tool.inputSchema ?? {
-            type: 'object',
-            properties: {},
-            required: [],
-          },
-        };
+        const toolSchema = toolDescriptor(tool);
 
         this.unprotectedTools.push(toolSchema);
+        this.localTools.push(toolSchema);
         this.toolHandlers.set(tool.name, tool.handler);
         console.log(
           `Registered unprotected tool: ${tool.name} (standard MCP tool, no auth required)`
@@ -100,6 +103,17 @@ class MCPServer {
     });
 
     this.app.post('/', async (req, res) => {
+      await this.handleMcpPost(req, res);
+    });
+  }
+
+  registerMcpEndpoint(path: string): void {
+    this.app.post(path, async (req, res) => {
+      await this.handleMcpPost(req, res);
+    });
+  }
+
+  private async handleMcpPost(req: express.Request, res: express.Response): Promise<void> {
       try {
         const message = req.body as McpMessage;
         const response = await this.processMcpMessage(message, req);
@@ -111,7 +125,19 @@ class MCPServer {
           error: { code: -32603, message: e.message ?? String(e) },
         });
       }
-    });
+  }
+
+  manifestTools(): ManifestToolInput[] {
+    return this.localTools.map((tool) => ({
+      name: String(tool.name),
+      title: typeof tool.title === 'string' ? tool.title : undefined,
+      description: typeof tool.description === 'string' ? tool.description : undefined,
+      input_schema:
+        tool.inputSchema && typeof tool.inputSchema === 'object'
+          ? tool.inputSchema
+          : undefined,
+      suggested_scopes: this.userTools.find((t) => t.name === tool.name)?.rbac?.scopes ?? [],
+    }));
   }
 
   private deriveReturnUrl(req: express.Request): string | null {
@@ -287,6 +313,14 @@ class MCPServer {
     }
 
     if (method === 'tools/list') {
+      if (this.hasRuntimePrincipal(req)) {
+        return {
+          jsonrpc: '2.0',
+          id: messageId,
+          result: { tools: this.localTools },
+        };
+      }
+
       // Get protected tools from SDK Manager (with OAuth and RBAC)
       let toolsResponse: Record<string, any>;
       const toolsListTimeout = parseInt(
@@ -396,6 +430,7 @@ class MCPServer {
           content = [{ type: 'text', text: JSON.stringify(errorPayload) }];
         }
       } else if (this.toolHandlers.has(toolName)) {
+        const principal = this.runtimePrincipal(req);
         if (
           typeof arguments_ === 'object' &&
           arguments_ !== null &&
@@ -403,6 +438,9 @@ class MCPServer {
           getCurrentSessionId()
         ) {
           arguments_.session_id = getCurrentSessionId();
+        }
+        if (principal) {
+          arguments_._authsec_principal = principal;
         }
         // Execute user's tool locally
         content = await this.toolHandlers.get(toolName)!(arguments_);
@@ -427,6 +465,16 @@ class MCPServer {
       id: messageId,
       error: { code: -32601, message: `Method not found: ${method}` },
     };
+  }
+
+  private hasRuntimePrincipal(req: express.Request): boolean {
+    return this.runtimePrincipal(req) !== null;
+  }
+
+  private runtimePrincipal(req: express.Request): Principal | null {
+    const principal = (req as any).locals?.principal;
+    if (!principal || typeof principal !== 'object') return null;
+    return principal as Principal;
   }
 
   private async cleanupSessions(): Promise<void> {
@@ -468,6 +516,12 @@ export interface RunMcpServerOptions {
   port?: number;
   /** Optional path to SPIRE agent socket */
   spireSocketPath?: string;
+  /** AuthSec-protected MCP path (default: "/mcp"). */
+  path?: string;
+  /** Explicit runtime config. If omitted, AUTHSEC_* env vars are used when present. */
+  runtimeConfig?: RuntimeConfig;
+  /** Set false to force the legacy SDK Manager OAuth-tools flow only. */
+  enableRuntime?: boolean;
 }
 
 /**
@@ -494,6 +548,7 @@ export interface RunMcpServerOptions {
 export function runMcpServerWithOAuth(options: RunMcpServerOptions): void {
   const host = options.host ?? '0.0.0.0';
   const port = options.port ?? 3005;
+  const runtimePath = options.path ?? '/mcp';
 
   const authServiceUrl = process.env.AUTHSEC_AUTH_SERVICE_URL;
   const servicesBaseUrl = process.env.AUTHSEC_SERVICES_URL;
@@ -536,11 +591,84 @@ export function runMcpServerWithOAuth(options: RunMcpServerOptions): void {
     console.log('SPIRE Workload Identity: DISABLED');
   }
 
-  console.log(
-    `MCP Inspector: npx @modelcontextprotocol/inspector http://${host}:${port}`
-  );
+  const runtimeConfig = resolveRuntimeConfig(options);
 
-  server.app.listen(port, host, () => {
-    console.log(`Server listening on ${host}:${port}`);
-  });
+  const start = () => {
+    console.log(
+      `MCP Inspector: npx @modelcontextprotocol/inspector http://${host}:${port}${runtimeConfig ? runtimePath : ''}`
+    );
+
+    server.app.listen(port, host, () => {
+      console.log(`Server listening on ${host}:${port}`);
+      if (runtimeConfig) {
+        console.log(`AuthSec runtime: ENABLED on ${runtimePath}`);
+        console.log(`Protected resource metadata: ${metadataPathHint(runtimeConfig)}`);
+      } else {
+        console.log('AuthSec runtime: DISABLED (legacy SDK Manager OAuth tools mode)');
+      }
+    });
+  };
+
+  if (runtimeConfig) {
+    mountMCP(server.app as any, {
+      config: runtimeConfig,
+      path: runtimePath,
+      tools: server.manifestTools(),
+    })
+      .then(() => {
+        server.registerMcpEndpoint(runtimePath);
+        start();
+      })
+      .catch((err) => {
+        console.error(`Failed to start AuthSec runtime: ${err.message ?? err}`);
+        process.exit(1);
+      });
+    return;
+  }
+
+  server.registerMcpEndpoint(runtimePath);
+  start();
+}
+
+function toolDescriptor(tool: ToolDefinition): Record<string, any> {
+  return {
+    name: tool.name,
+    description: tool.description ?? `Tool: ${tool.name}`,
+    inputSchema: tool.inputSchema ?? {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  };
+}
+
+function resolveRuntimeConfig(options: RunMcpServerOptions): RuntimeConfig | null {
+  if (options.enableRuntime === false) return null;
+
+  const cfg = options.runtimeConfig ?? loadConfigFromEnv();
+  const hasRuntimeEnv =
+    !!cfg.resourceUri.trim() &&
+    !!cfg.resourceServerId.trim() &&
+    !!cfg.issuer.trim() &&
+    (!!cfg.jwksUrl.trim() || !!cfg.introspectionUrl.trim());
+  if (!options.runtimeConfig && !hasRuntimeEnv) return null;
+
+  if (!cfg.resourceName) cfg.resourceName = options.appName;
+  if (!cfg.introspectionClientId && cfg.resourceServerId) {
+    cfg.introspectionClientId = cfg.resourceServerId;
+  }
+  validateConfig(cfg);
+  return cfg;
+}
+
+function metadataPathHint(cfg: RuntimeConfig): string {
+  try {
+    const parsed = new URL(cfg.resourceUri);
+    const path = parsed.pathname.replace(/^\/+|\/+$/g, '');
+    return path
+      ? `/.well-known/oauth-protected-resource/${path}`
+      : '/.well-known/oauth-protected-resource';
+  } catch {
+    return '/.well-known/oauth-protected-resource';
+  }
 }

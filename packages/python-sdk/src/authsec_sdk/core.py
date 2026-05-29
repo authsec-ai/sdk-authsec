@@ -625,7 +625,7 @@ def protected_by_AuthSec(
 
     RBAC Validation:
         - If no RBAC parameters are provided, only authentication is required
-        - If RBAC parameters are provided, they are validated against tenant_{tenant_id} database
+        - If RBAC parameters are provided, they are validated against tenant_{workspace_id} database
         - RBAC check happens during oauth_authenticate tool execution
         - Only tools that satisfy RBAC conditions are exposed/unprotected
 
@@ -687,7 +687,6 @@ def protected_by_AuthSec(
                 _session_user_info[str(resolved_session_id)] = user_info
                 # Make resolved session_id available to downstream tool logic.
                 arguments["session_id"] = resolved_session_id
-            print(json.dumps(user_info, indent=2))
 
             # Enforce RBAC at execution time
             rbac_ok, rbac_reason = _evaluate_rbac(user_info, func._rbac_requirements)
@@ -709,7 +708,7 @@ def protected_by_AuthSec(
                     def __init__(self, session_id: str, user_info: Dict):
                         self.session_id = session_id
                         self.access_token = user_info.get("access_token")
-                        self.tenant_id = user_info.get("tenant_id")
+                        self.workspace_id = user_info.get("workspace_id")
                         self.user_id = user_info.get("user_id")
                         self.org_id = user_info.get("org_id")
 

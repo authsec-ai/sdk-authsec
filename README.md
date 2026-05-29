@@ -54,7 +54,17 @@ npm i @authsec/sdk
 npx authsec init    # interactive URL + client_id setup
 ```
 
-### C) Python — from source (local dev)
+### C) Go — MCP Resource Server SDK
+
+```bash
+go get github.com/authsec-ai/sdk-authsec/packages/go-sdk
+```
+
+Use the Go SDK when you are protecting an MCP Streamable HTTP resource server and want AuthSec to handle OAuth discovery, JWT/introspection validation, MCP tool inventory publishing, `tools/list` filtering, and `tools/call` authorization.
+
+See [`packages/go-sdk/README.md`](packages/go-sdk/README.md) for the complete Go integration guide.
+
+### D) Python — from source (local dev)
 
 ```bash
 git clone https://github.com/authsec-ai/sdk-authsec.git
@@ -63,7 +73,7 @@ pip install -e .
 authsec init
 ```
 
-### D) TypeScript — from source (local dev)
+### E) TypeScript — from source (local dev)
 
 ```bash
 git clone https://github.com/authsec-ai/sdk-authsec.git
@@ -121,6 +131,7 @@ This repository is organized as a monorepo with professional package boundaries:
 
 - `packages/python-sdk`: Python package (`authsec_sdk`)
 - `packages/typescript-sdk`: TypeScript package (`@authsec/sdk`)
+- `packages/go-sdk`: Go package for protecting MCP HTTP resource servers with AuthSec OAuth, RBAC, tool inventory, and per-tool authorization
 
 Memory MCP wrapper example:
 

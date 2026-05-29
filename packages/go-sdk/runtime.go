@@ -44,11 +44,11 @@ func (e ErrInsufficientScope) Error() string {
 
 // Runtime is the core enforcement engine.
 type Runtime struct {
-	cfg              Config
-	validator        Validator
-	scopeMatrix      *ScopeMatrixClient // nil if no remote policy needed
-	policyMode       PolicyMode
-	publishOnce      sync.Once          // guards idempotent manifest publish in Wrap
+	cfg         Config
+	validator   Validator
+	scopeMatrix *ScopeMatrixClient // nil if no remote policy needed
+	policyMode  PolicyMode
+	publishOnce sync.Once // guards idempotent manifest publish in Wrap
 }
 
 // NewRuntime constructs and validates a Runtime. For PolicyModeRemoteRequired,
@@ -446,44 +446,40 @@ func (rt *Runtime) writeFilteredToolResponse(
 
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		rec.WriteTo(w)
-		return
-	}
-
-	result, ok := payload["result"].(map[string]any)
-	if !ok {
-		rec.WriteTo(w)
-		return
-	}
-
-	rawTools, ok := result["tools"].([]any)
-	if !ok {
-		rec.WriteTo(w)
-		return
-	}
-
-	filtered := make([]any, 0, len(rawTools))
-	for _, rawTool := range rawTools {
-		toolMap, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := toolMap["name"].(string)
-		err := rt.AuthorizeTool(ctx, principal, name)
-		if err != nil {
+		filteredBody, filtered, filterErr := rt.filterSSEToolResponse(ctx, body, principal)
+		if filterErr != nil {
 			var policyErr ErrPolicyUnavailable
-			if errors.As(err, &policyErr) {
-				// Policy unavailable during filtering: discard upstream response, return 503.
+			if errors.As(filterErr, &policyErr) {
 				rt.writePolicyUnavailable(w)
 				return
 			}
-			// ErrInsufficientScope: silently exclude from list (existing behavior).
-			continue
+			rec.WriteTo(w)
+			return
 		}
-		filtered = append(filtered, rawTool)
+		if filtered {
+			for key, values := range rec.header {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.Header().Del("Content-Length")
+			w.WriteHeader(rec.statusCode)
+			_, _ = w.Write(filteredBody)
+			return
+		}
+		rec.WriteTo(w)
+		return
 	}
 
-	result["tools"] = filtered
+	if err := rt.filterToolPayload(ctx, payload, principal); err != nil {
+		var policyErr ErrPolicyUnavailable
+		if errors.As(err, &policyErr) {
+			rt.writePolicyUnavailable(w)
+			return
+		}
+		rec.WriteTo(w)
+		return
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		rec.WriteTo(w)
@@ -498,6 +494,96 @@ func (rt *Runtime) writeFilteredToolResponse(
 	w.Header().Del("Content-Length")
 	w.WriteHeader(rec.statusCode)
 	_, _ = w.Write(out)
+}
+
+func (rt *Runtime) filterToolPayload(ctx context.Context, payload map[string]any, principal *Principal) error {
+	result, ok := payload["result"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	rawTools, ok := result["tools"].([]any)
+	if !ok {
+		return nil
+	}
+
+	filtered := make([]any, 0, len(rawTools))
+	for _, rawTool := range rawTools {
+		toolMap, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := toolMap["name"].(string)
+		err := rt.AuthorizeTool(ctx, principal, name)
+		if err != nil {
+			var policyErr ErrPolicyUnavailable
+			if errors.As(err, &policyErr) {
+				return policyErr
+			}
+			// ErrInsufficientScope: silently exclude from list.
+			continue
+		}
+		filtered = append(filtered, rawTool)
+	}
+
+	result["tools"] = filtered
+	return nil
+}
+
+func (rt *Runtime) filterSSEToolResponse(ctx context.Context, body []byte, principal *Principal) ([]byte, bool, error) {
+	text := string(body)
+	if !strings.Contains(text, "data:") {
+		return nil, false, nil
+	}
+
+	blocks := strings.Split(text, "\n\n")
+	changed := false
+	for i, block := range blocks {
+		if strings.TrimSpace(block) == "" {
+			continue
+		}
+		lines := strings.Split(block, "\n")
+		dataParts := make([]string, 0)
+		dataLineStart := -1
+		dataLineEnd := -1
+		for idx, line := range lines {
+			if strings.HasPrefix(line, "data:") {
+				if dataLineStart == -1 {
+					dataLineStart = idx
+				}
+				dataLineEnd = idx
+				dataParts = append(dataParts, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		if len(dataParts) == 0 {
+			continue
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(strings.Join(dataParts, "\n")), &payload); err != nil {
+			continue
+		}
+		if err := rt.filterToolPayload(ctx, payload, principal); err != nil {
+			return nil, false, err
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return nil, false, err
+		}
+
+		nextLines := make([]string, 0, len(lines)-(dataLineEnd-dataLineStart)+1)
+		nextLines = append(nextLines, lines[:dataLineStart]...)
+		nextLines = append(nextLines, "data: "+string(encoded))
+		if dataLineEnd+1 < len(lines) {
+			nextLines = append(nextLines, lines[dataLineEnd+1:]...)
+		}
+		blocks[i] = strings.Join(nextLines, "\n")
+		changed = true
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	return []byte(strings.Join(blocks, "\n\n")), true, nil
 }
 
 func (rt *Runtime) writeFilteredBatchResponse(

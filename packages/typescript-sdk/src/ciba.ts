@@ -2,9 +2,9 @@
  * CIBA SDK - Passwordless Authentication for Voice Clients
  * Mirrors Python CIBAClient class
  *
- * Supports both Admin and End-User (tenant) authentication flows:
+ * Supports both Admin and End-User authentication flows:
  * - Admin flow: email only (original flow)
- * - Tenant flow: email + client_id (multi-client architecture)
+ * - End-user flow: email + client_id (workspace /auth/workspace/* route surface)
  */
 
 import { loadConfigFile, DEFAULT_CIBA_BASE_URL } from './config.js';
@@ -30,7 +30,7 @@ export class CIBAClient {
   /**
    * Triggers a CIBA push notification and cancels any existing poll for this user.
    *
-   * - If clientId is set: uses tenant endpoint (/tenant/ciba/initiate)
+   * - If clientId is set: uses end-user endpoint (/workspace/ciba/initiate)
    * - If clientId is null: uses admin endpoint (/ciba/initiate)
    */
   async initiateAppApproval(email: string): Promise<Record<string, any>> {
@@ -43,7 +43,7 @@ export class CIBAClient {
     let payload: Record<string, any>;
 
     if (this.clientId) {
-      endpoint = `${this.baseUrl}/authsec/uflow/auth/tenant/ciba/initiate`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/workspace/ciba/initiate`;
       payload = {
         client_id: this.clientId,
         email,
@@ -69,7 +69,7 @@ export class CIBAClient {
   /**
    * Verifies a TOTP code for authentication.
    *
-   * - If clientId is set: uses tenant endpoint (/tenant/totp/login)
+   * - If clientId is set: uses end-user endpoint (/workspace/totp/login)
    * - If clientId is null: uses admin endpoint (/totp/login)
    */
   async verifyTotp(email: string, code: string): Promise<Record<string, any>> {
@@ -84,15 +84,10 @@ export class CIBAClient {
     let payload: Record<string, any>;
 
     if (this.clientId) {
-      endpoint = `${this.baseUrl}/authsec/uflow/auth/tenant/totp/login`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/workspace/totp/login`;
       payload = { client_id: this.clientId, email, totp_code: code };
     } else {
-      // Admin flow (fallback to dev.api if base_url is localhost for compatibility)
-      if (this.baseUrl.includes('localhost') || this.baseUrl.includes('127.0.0.1')) {
-        endpoint = 'https://dev.api.authsec.dev/authsec/uflow/auth/totp/login';
-      } else {
-        endpoint = `${this.baseUrl}/authsec/uflow/auth/totp/login`;
-      }
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/totp/login`;
       payload = { email, totp_code: code };
     }
 
@@ -130,7 +125,7 @@ export class CIBAClient {
   /**
    * Polls for CIBA approval status.
    *
-   * - If clientId is set: uses tenant endpoint (/tenant/ciba/token)
+   * - If clientId is set: uses end-user endpoint (/workspace/ciba/token)
    * - If clientId is null: uses admin endpoint (/ciba/token)
    */
   async pollForApproval(
@@ -147,7 +142,7 @@ export class CIBAClient {
     let payload: Record<string, any>;
 
     if (this.clientId) {
-      endpoint = `${this.baseUrl}/authsec/uflow/auth/tenant/ciba/token`;
+      endpoint = `${this.baseUrl}/authsec/uflow/auth/workspace/ciba/token`;
       payload = { client_id: this.clientId, auth_req_id: authReqId };
     } else {
       endpoint = `${this.baseUrl}/authsec/uflow/auth/ciba/token`;

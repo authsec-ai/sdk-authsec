@@ -72,11 +72,12 @@ func PublishManifest(ctx context.Context, cfg Config, innerHandler http.Handler)
 		// Convert ManifestTool → rawTool for uniform downstream handling.
 		for _, mt := range manifestTools {
 			tools = append(tools, rawTool{
-				Name:        mt.Name,
-				Title:       mt.Title,
-				Description: mt.Description,
-				InputSchema: mt.InputSchema,
-				Annotations: mt.Annotations,
+				Name:            mt.Name,
+				Title:           mt.Title,
+				Description:     mt.Description,
+				InputSchema:     mt.InputSchema,
+				Annotations:     mt.Annotations,
+				SuggestedScopes: mt.SuggestedScopes,
 			})
 		}
 	} else {
@@ -139,11 +140,12 @@ func manifestEndpoint(cfg Config) (string, error) {
 // We carry annotations and inputSchema as RawMessage so they pass through
 // untouched — the admin UI consumes them as-is.
 type rawTool struct {
-	Name        string          `json:"name"`
-	Title       string          `json:"title,omitempty"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
-	Annotations json.RawMessage `json:"annotations,omitempty"`
+	Name            string          `json:"name"`
+	Title           string          `json:"title,omitempty"`
+	Description     string          `json:"description,omitempty"`
+	InputSchema     json.RawMessage `json:"inputSchema,omitempty"`
+	Annotations     json.RawMessage `json:"annotations,omitempty"`
+	SuggestedScopes []string        `json:"suggested_scopes,omitempty"`
 }
 
 type toolsListResponse struct {
@@ -287,7 +289,9 @@ func buildManifestPayload(tools []rawTool, suggestions map[string][]string) map[
 			InputSchema: t.InputSchema,
 			Annotations: t.Annotations,
 		}
-		if scopes, ok := suggestions[t.Name]; ok {
+		if len(t.SuggestedScopes) > 0 {
+			entry.SuggestedScopes = append([]string{}, t.SuggestedScopes...)
+		} else if scopes, ok := suggestions[t.Name]; ok {
 			// Defensive copy so concurrent map mutation in the caller can't
 			// affect what we marshal.
 			entry.SuggestedScopes = append([]string{}, scopes...)

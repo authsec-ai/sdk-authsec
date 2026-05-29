@@ -1,6 +1,102 @@
 # AuthSec TypeScript SDK (`@authsec/sdk`)
 
-TypeScript runtime for exposing MCP tools behind AuthSec OAuth and RBAC.
+TypeScript runtime for protecting MCP HTTP resource servers with AuthSec OAuth,
+protected-resource metadata, remote tool policy, manifest publishing, and
+per-tool authorization.
+
+## Recommended MCP Runtime
+
+For new MCP servers, mount the AuthSec runtime on your real MCP route. The SDK
+serves RFC 9728 metadata at the matching well-known path and protects `POST /mcp`.
+
+```ts
+import express from "express";
+import { loadConfigFromEnv, mountMCP } from "@authsec/sdk";
+
+const app = express();
+app.use(express.json());
+
+const cfg = loadConfigFromEnv();
+
+await mountMCP(app, {
+  config: cfg,
+  path: "/mcp",
+  tools: [
+    {
+      name: "read_note",
+      description: "Read a note by ID.",
+      suggested_scopes: ["notes:read"],
+    },
+  ],
+});
+
+app.post("/mcp", (req, res) => {
+  const principal = (req as any).locals?.principal;
+  res.json({
+    jsonrpc: "2.0",
+    id: req.body?.id ?? null,
+    result: { ok: true, subject: principal?.subject },
+  });
+});
+```
+
+The copied AuthSec environment block should include:
+
+```bash
+AUTHSEC_RESOURCE_SERVER_ID=<application-id>
+AUTHSEC_RESOURCE_URI=https://your-mcp.example.com/mcp
+AUTHSEC_RESOURCE_NAME="Your MCP Server"
+AUTHSEC_ISSUER=https://dev.api.authsec.dev
+AUTHSEC_AUTHORIZATION_SERVER=https://dev.api.authsec.dev
+AUTHSEC_JWKS_URL=https://dev.api.authsec.dev/oauth/jwks
+AUTHSEC_INTROSPECTION_URL=https://dev.api.authsec.dev/oauth/introspect
+AUTHSEC_INTROSPECTION_CLIENT_ID=<application-id>
+AUTHSEC_INTROSPECTION_CLIENT_SECRET=<one-time-secret>
+AUTHSEC_POLICY_MODE=remote_required
+AUTHSEC_PUBLISH_MANIFEST=true
+```
+
+Legacy aliases from older docs are accepted: `AUTHSEC_RESOURCE`,
+`AUTHSEC_JWKS_URI`, `AUTHSEC_INTROSPECTION_ENDPOINT`,
+`AUTHSEC_INTROSPECTION_ID`, and `AUTHSEC_INTROSPECTION_SECRET`.
+
+Scopes in the SDK are now **suggestions/access labels** for AuthSec's manifest
+and UI. Runtime enforcement uses the authoritative tool policy fetched from
+AuthSec. Do not use SDK-local legacy predefined scopes as the source of truth.
+
+## Legacy Decorator Bootstrap
+
+`protectedByAuthSec()` and `runMcpServerWithOAuth()` remain supported. When the
+AuthSec runtime env vars above are present, `runMcpServerWithOAuth()` also mounts
+the protected `/mcp` route and RFC 9728 metadata while keeping the legacy root
+JSON-RPC endpoint available for older local workflows.
+
+```ts
+import { protectedByAuthSec, runMcpServerWithOAuth } from "@authsec/sdk";
+
+const readNote = protectedByAuthSec(
+  {
+    toolName: "read_note",
+    scopes: ["notes:read"], // manifest suggestion; AuthSec policy is authoritative
+  },
+  async (_args, session) => [
+    { type: "text", text: `hello ${session.workspaceId ?? session.userId}` },
+  ],
+);
+
+runMcpServerWithOAuth({
+  tools: [readNote],
+  clientId: process.env.AUTHSEC_RESOURCE_SERVER_ID ?? "local-client",
+  appName: process.env.AUTHSEC_RESOURCE_NAME ?? "local-mcp",
+});
+```
+
+With runtime env present:
+
+- `POST /mcp` is protected by AuthSec.
+- `GET /.well-known/oauth-protected-resource/mcp` serves metadata.
+- `tools/list` is filtered by the same tool policy used for `tools/call`.
+- the old `POST /` SDK Manager OAuth-tools flow still exists for local legacy use.
 
 ## Local Memory Wrapper Smoke Test
 

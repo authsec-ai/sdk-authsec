@@ -1,307 +1,79 @@
 # AuthSec Go SDK
 
-Go package for turning an MCP HTTP server into an AuthSec-protected resource.
+Go SDK for protecting MCP Streamable HTTP servers with AuthSec OAuth, RBAC, tool inventory, and per-tool authorization.
 
-This SDK is wrapper-first. The developer should not have to hand-build:
+Use this package when you already have an MCP HTTP handler and want AuthSec to own:
 
-- `/.well-known/oauth-protected-resource`
-- MCP bearer challenges with `resource_metadata`
-- JWT/JWKS validation
-- introspection fallback
-- principal hydration
+- OAuth protected-resource metadata
+- `WWW-Authenticate` bearer challenges with `resource_metadata`
+- JWT/JWKS validation and optional introspection
+- principal hydration in `context.Context`
 - `tools/list` filtering
-- `tools/call` authorization checks
+- `tools/call` authorization
+- tool inventory publishing into the AuthSec dashboard
+- remote tool-to-scope policy fetching from AuthSec
 
-The intended model is:
+The SDK does not call your upstream application APIs. Your MCP server should keep its own upstream credential, such as a GitHub App token or server-side PAT. The caller's bearer token should be an AuthSec access token only.
 
-1. You register your MCP server as a Resource Server in AuthSec.
-2. You wrap your MCP HTTP handler with this SDK.
-3. MCP clients authenticate against AuthSec.
-4. AuthSec users, scopes, RBAC, and consent live in the AuthSec console.
-5. Your MCP server receives only AuthSec access tokens from clients and never uses those tokens as upstream API credentials.
+## Mental Model
 
-## AuthSec endpoints
+There are three systems in the integration:
 
-This package expects an AuthSec deployment that exposes:
+| System | Responsibility |
+|---|---|
+| Your MCP server | Serves MCP tools and executes work with its own upstream credential. |
+| AuthSec | Handles OAuth, users, clients, scopes, RBAC, consent, resource-server setup, and policy state. |
+| AuthSec Go SDK | Sits at the MCP boundary and enforces AuthSec decisions before `tools/list` and `tools/call` reach your server. |
 
-- OAuth authorization server metadata
-- OIDC discovery
-- OAuth authorize and token endpoints
-- JWKS and introspection
-- resource server administration
+The normal request flow is:
 
-Use the following placeholders throughout this guide:
+1. MCP client calls your MCP endpoint without a token.
+2. SDK returns `401` with `WWW-Authenticate: Bearer resource_metadata="..."`.
+3. Client reads the protected-resource metadata.
+4. Client authenticates with AuthSec.
+5. Client retries with an AuthSec access token.
+6. SDK validates the token and enforces tool policy.
+7. Your MCP handler receives the request only after authentication and authorization.
 
-- `<AUTHSEC_API_ORIGIN>` — public AuthSec API and OAuth/OIDC issuer host
-- `<RESOURCE_SERVER_ORIGIN>` — public origin of the MCP server
+## Endpoints Expected From AuthSec
 
-The SDK expects AuthSec to expose:
+Use these placeholders throughout the guide:
 
-- Authorization server metadata: `<AUTHSEC_API_ORIGIN>/.well-known/oauth-authorization-server`
-- OIDC discovery: `<AUTHSEC_API_ORIGIN>/.well-known/openid-configuration`
-- Authorize: `<AUTHSEC_API_ORIGIN>/oauth/authorize`
-- Token: `<AUTHSEC_API_ORIGIN>/oauth/token`
-- Introspection: `<AUTHSEC_API_ORIGIN>/oauth/introspect`
-- JWKS: `<AUTHSEC_API_ORIGIN>/oauth/jwks`
-- PAR: `<AUTHSEC_API_ORIGIN>/oauth/par`
-- Resource server admin API: `<AUTHSEC_API_ORIGIN>/authsec/resource-servers`
+- `<AUTHSEC_API_ORIGIN>`: public AuthSec API and OAuth issuer, for example `https://dev.api.authsec.dev`
+- `<RESOURCE_SERVER_ORIGIN>`: public origin of your MCP server, for example `https://mcp.example.com`
+- `<RESOURCE_URI>`: exact protected resource URI, usually `<RESOURCE_SERVER_ORIGIN>/mcp`
 
-The SDK owns the protected-resource metadata contract on your MCP server. The exact
-path depends on the `ResourceURI`:
+AuthSec must expose:
 
-- **Root resource** (e.g. `https://mcp.example.com`): the SDK serves the metadata at
-  `/.well-known/oauth-protected-resource` (bare path).
-- **Path-based resource** (e.g. `https://mcp.example.com/mcp`): the SDK serves the
-  metadata only at the path-derived alias `/.well-known/oauth-protected-resource/mcp`.
-  The bare `/.well-known/oauth-protected-resource` path is **not** registered for
-  path-based resources.
+- `<AUTHSEC_API_ORIGIN>/.well-known/oauth-authorization-server`
+- `<AUTHSEC_API_ORIGIN>/.well-known/openid-configuration`
+- `<AUTHSEC_API_ORIGIN>/oauth/authorize`
+- `<AUTHSEC_API_ORIGIN>/oauth/token`
+- `<AUTHSEC_API_ORIGIN>/oauth/jwks`
+- `<AUTHSEC_API_ORIGIN>/oauth/introspect`
+- `<AUTHSEC_API_ORIGIN>/oauth/par`
+- `<AUTHSEC_API_ORIGIN>/authsec/resource-servers`
 
-Use `BuildResourceMetadataURL(cfg.ResourceURI)` to compute the correct discovery URL
-for your resource, rather than assuming the bare well-known path.
+Your MCP server, via this SDK, exposes protected-resource metadata:
 
-The `ResourceURI` value is the source of truth for the metadata payload and the
-challenge target.
+- Root resource, `ResourceURI = https://mcp.example.com`: `/.well-known/oauth-protected-resource`
+- Path resource, `ResourceURI = https://mcp.example.com/mcp`: `/.well-known/oauth-protected-resource/mcp`
 
-## What AuthSec owns vs what the SDK owns
+Do not assume the bare well-known path for path-based resources. Use:
 
-### AuthSec owns
-
-- login and identity provider flows
-- OAuth/OIDC discovery and token issuance
-- PAR-backed authorization
-- DCR / preregistered client registration
-- scopes, RBAC, and consent
-- tool→scope mapping (Scope Matrix)
-- JWKS and introspection with live RBAC resolution
-- user and tenant administration
-- auditability and policy control
-
-### The SDK owns
-
-- protected-resource metadata on your MCP server
-- bearer challenge responses for unauthenticated MCP requests
-- AuthSec token validation (JWT + introspection)
-- principal creation and request context hydration
-- tool visibility filtering on `tools/list` (using AuthSec's tool→scope mapping)
-- tool call authorization on `tools/call` (using AuthSec's tool→scope mapping)
-
-## What the package provides
-
-This package is generic. It is not tied to a single MCP server implementation.
-
-It currently provides:
-
-- a high-level HTTP wrapper
-- protected-resource metadata mounting
-- hybrid JWT + introspection validation
-- principal context injection
-- tool authorization via AuthSec's scope matrix (remote fetch + cache)
-- optional local tool→scope fallback for defense-in-depth
-
-It does not include:
-
-- server-specific bootstrap helpers
-- CLI provisioning
-- automatic admin-side resource server creation
-
-Provisioning happens in AuthSec, then you point the SDK at the resulting values.
-
-## Step 1: Register your MCP server in AuthSec
-
-You can do this in the AuthSec UI or via the AuthSec admin API.
-
-For example, for a GitHub MCP server at:
-
-- public server origin: `<RESOURCE_SERVER_ORIGIN>`
-- protected MCP endpoint: `<RESOURCE_SERVER_ORIGIN>/mcp`
-
-use these values.
-
-### In the AuthSec UI
-
-Go to `Resource Servers` and create a new resource server with:
-
-- `Name`: `GitHub MCP Server`
-- `Public base URL`: `<RESOURCE_SERVER_ORIGIN>`
-- `Protected base path`: `/mcp`
-- `Supported scopes`:
-  - `issues:read`
-  - `issues:write`
-  - `pull_requests:read`
-  - `pull_requests:write`
-  - `repos:read`
-  - `repos:write`
-  - `actions:read`
-  - `actions:write`
-  - `security:read`
-  - `admin:write`
-- `Registration modes`:
-  - `dcr`
-  - `prereg`
-  - `cimd`
-
-What this means:
-
-- `Public base URL` is the public origin of your MCP server.
-- `Protected base path` is the path the MCP protocol is actually served on.
-- AuthSec computes the protected resource URI as:
-  - `resource_uri = public_base_url + protected_base_path`
-  - for this example: `<RESOURCE_SERVER_ORIGIN>/mcp`
-
-After creation, AuthSec returns:
-
-- `id` (resource server UUID — **save this for the SDK config**)
-- `resource_url`
-- `jwks_uri`
-- `introspection_endpoint`
-- `introspection_secret`
-- `scopes_supported`
-
-You need those values for the SDK config.
-
-### Via the AuthSec admin API
-
-The same setup can be created with:
-
-```bash
-curl -X POST '<AUTHSEC_API_ORIGIN>/authsec/resource-servers' \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <admin_jwt>' \
-  -d '{
-    "name": "GitHub MCP Server",
-    "public_base_url": "<RESOURCE_SERVER_ORIGIN>",
-    "protected_base_path": "/mcp",
-    "scopes_supported": [
-      "issues:read",
-      "issues:write",
-      "pull_requests:read",
-      "pull_requests:write",
-      "repos:read",
-      "repos:write",
-      "actions:read",
-      "actions:write",
-      "security:read",
-      "admin:write"
-    ],
-    "registration_modes": ["dcr", "prereg", "cimd"]
-  }'
+```go
+authsecsdk.BuildResourceMetadataURL(cfg.ResourceURI)
 ```
 
-Expected response shape:
+## Quick Start
 
-```json
-{
-  "id": "<resource-server-id>",
-  "issuer_url": "<AUTHSEC_API_ORIGIN>",
-  "resource_url": "<RESOURCE_SERVER_ORIGIN>/mcp",
-  "jwks_uri": "<AUTHSEC_API_ORIGIN>/oauth/jwks",
-  "introspection_endpoint": "<AUTHSEC_API_ORIGIN>/oauth/introspect",
-  "introspection_secret": "<one-time-secret>",
-  "validation_mode": "auto",
-  "scopes_supported": [
-    "issues:read",
-    "issues:write",
-    "pull_requests:read",
-    "pull_requests:write",
-    "repos:read",
-    "repos:write",
-    "actions:read",
-    "actions:write",
-    "security:read",
-    "admin:write"
-  ]
-}
-```
-
-Important:
-
-- save the `id` — you need it for `ResourceServerID` in the SDK config
-- store `introspection_secret` immediately
-- AuthSec only returns the plaintext secret once
-- if lost, rotate it from:
-  - `POST /authsec/resource-servers/:id/rotate-introspection-secret`
-- use the returned `scopes_supported` as the source of truth for the SDK's
-  `SupportedScopes` configuration; those same values are emitted back to clients
-  as `scopes_supported` in protected-resource metadata
-
-## Step 2: Decide how MCP clients will register
-
-For most MCP resources, the default should be:
-
-- `dcr` enabled for standard MCP/OAuth clients
-- `prereg` enabled if you want explicit admin-approved clients
-- `cimd` only if you need client metadata discovery workflows
-
-For initial testing, `dcr + prereg + cimd` is a practical default.
-
-If you want to pre-register a client explicitly:
-
-```bash
-curl -X POST '<AUTHSEC_API_ORIGIN>/authsec/resource-servers/<resource-server-id>/clients' \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <admin_jwt>' \
-  -d '{
-    "client_name": "Claude Desktop",
-    "redirect_uris": ["http://127.0.0.1:8787/callback"],
-    "grant_types": ["authorization_code"],
-    "response_types": ["code"],
-    "token_endpoint_auth_method": "none",
-    "resource": "<RESOURCE_SERVER_ORIGIN>/mcp",
-    "scope": "issues:read pull_requests:read repos:read"
-  }'
-```
-
-## Step 3: Add the SDK to your Go MCP server
-
-Add the module:
+Install:
 
 ```bash
 go get github.com/authsec-ai/sdk-authsec/packages/go-sdk
 ```
 
-Then wrap your MCP HTTP handler.
-
-### Configure AuthSec values
-
-Before you wire the SDK into your server, collect these values from your AuthSec deployment:
-
-- `Issuer`
-- `AuthorizationServer`
-- `JWKSURL`
-- `IntrospectionURL`
-- `IntrospectionClientID`
-- `IntrospectionClientSecret`
-- `ResourceURI`
-- `ResourceName`
-- `ResourceServerID`
-
-For example:
-
-```text
-Issuer=<AUTHSEC_API_ORIGIN>
-AuthorizationServer=<AUTHSEC_API_ORIGIN>
-JWKSURL=<AUTHSEC_API_ORIGIN>/oauth/jwks
-IntrospectionURL=<AUTHSEC_API_ORIGIN>/oauth/introspect
-ResourceURI=<RESOURCE_SERVER_ORIGIN>/mcp
-ResourceName=GitHub MCP Server
-ResourceServerID=<resource-server-uuid>
-```
-
-These fields are not interchangeable:
-
-- `Issuer` is the JWT `iss` value that the SDK validates on incoming access tokens.
-- `AuthorizationServer` is the public AuthSec API base used in protected-resource
-  metadata and for derived SDK admin calls such as
-  `{AuthorizationServer}/authsec/resource-servers/{ResourceServerID}/sdk-policy`.
-
-If your deployment uses the same host for both, set them to the same value. If not,
-configure them separately.
-
-### Minimal integration example
-
-Use `MountMCP` — it is the canonical integration path. It registers exactly one
-protected-resource metadata route (derived from your `ResourceURI`) and the MCP
-handler in a single call, so you cannot accidentally skip the metadata route.
+Wrap your MCP handler:
 
 ```go
 package main
@@ -309,38 +81,53 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
 	authsecsdk "github.com/authsec-ai/sdk-authsec/packages/go-sdk"
 )
 
 func main() {
-	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Replace this with your actual MCP handler.
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"tools":[]}}`))
-	})
+	mcpHandler := buildYourMCPHandler()
 
 	cfg := authsecsdk.Config{
 		Issuer:                    "<AUTHSEC_API_ORIGIN>",
 		AuthorizationServer:       "<AUTHSEC_API_ORIGIN>",
 		JWKSURL:                   "<AUTHSEC_API_ORIGIN>/oauth/jwks",
 		IntrospectionURL:          "<AUTHSEC_API_ORIGIN>/oauth/introspect",
-		IntrospectionClientID:     "resource-server",
-		IntrospectionClientSecret: "<introspection-secret-from-authsec>",
+		IntrospectionClientID:     "<resource-server-id>",
+		IntrospectionClientSecret: "<introspection-secret>",
 		ResourceURI:               "<RESOURCE_SERVER_ORIGIN>/mcp",
 		ResourceName:              "GitHub MCP Server",
-		ResourceServerID:          "<resource-server-uuid>",
+		ResourceServerID:          "<resource-server-id>",
 		SupportedScopes: []string{
+			"repos:read",
+			"repos:write",
 			"issues:read",
 			"issues:write",
 			"pull_requests:read",
 			"pull_requests:write",
-			"repos:read",
-			"repos:write",
 			"actions:read",
 			"actions:write",
 			"security:read",
 			"admin:write",
+		},
+		PolicyMode:     authsecsdk.PolicyModeRemoteWithLocalFallback,
+		ValidationMode: authsecsdk.ValidationModeJWTAndIntrospect,
+		ScopeMatrixTTL: 5 * time.Minute,
+
+		// Recommended for production. This pushes tool inventory to AuthSec
+		// so the setup wizard can show and map tools even when /mcp is protected.
+		PublishManifest: true,
+		ToolScopeSuggestions: map[string][]string{
+			"search_repositories": {"repos:read"},
+			"create_issue":        {"issues:write"},
+		},
+
+		// Optional local fallback used only when AuthSec policy is temporarily
+		// unavailable and PolicyModeRemoteWithLocalFallback is selected.
+		ToolScopes: authsecsdk.ToolScopeMap{
+			"search_repositories": {"repos:read"},
+			"create_issue":        {"issues:write"},
 		},
 	}
 
@@ -353,362 +140,344 @@ func main() {
 }
 ```
 
-`MountMCP` registers:
-- `/.well-known/oauth-protected-resource/mcp` — the metadata route for this
-  path-based resource (derived from `ResourceURI`)
-- `/mcp` — the protected MCP handler
+`MountMCP` registers both:
 
-For a root resource (e.g. `ResourceURI: https://mcp.example.com`), the metadata
-route is `/.well-known/oauth-protected-resource` (bare path).
+- the protected-resource metadata route derived from `ResourceURI`
+- the protected MCP route, for example `/mcp`
 
-**Path-uniqueness constraint**: each resource registered on the same `http.ServeMux`
-must have a distinct URI path component. Two resources with identical paths on
-different hosts (e.g. `/mcp` on two different origins) would produce duplicate
-metadata routes on a shared mux. For host-based routing or multi-host setups, wire
-`rt.ProtectedResourceHandler()` at `BuildResourceMetadataPath(cfg.ResourceURI)` and
-`rt.Wrap(handler)` at your chosen pattern manually instead of using `MountMCP`.
+## Step 1: Create The Resource Server In AuthSec
 
-### Advanced: manual mux wiring with WrapMCPHTTP
+In the AuthSec dashboard, create a resource server:
 
-`WrapMCPHTTP` is available for advanced cases where you manage your own mux, use a
-framework router, or need to customize handler chaining. If you use it directly,
-**you are responsible for separately mounting the metadata handler**:
+- `Name`: human-readable name, for example `GitHub MCP Server`
+- `Public base URL`: `<RESOURCE_SERVER_ORIGIN>`
+- `Protected base path`: `/mcp`
+- `Supported scopes`: the OAuth scopes users may receive for this server
+- `Registration modes`: usually `dcr`, `prereg`, and `cimd`
+
+Example supported scopes for a GitHub MCP server:
+
+```text
+repos:read
+repos:write
+issues:read
+issues:write
+pull_requests:read
+pull_requests:write
+actions:read
+actions:write
+security:read
+admin:write
+```
+
+AuthSec computes:
+
+```text
+resource_uri = public_base_url + protected_base_path
+```
+
+For example:
+
+```text
+https://mcp.example.com/mcp
+```
+
+Save the values AuthSec returns:
+
+- resource server `id`
+- `resource_url`
+- `jwks_uri`
+- `introspection_endpoint`
+- one-time `introspection_secret`
+- `scopes_supported`
+
+The plaintext `introspection_secret` is returned once. If you lose it, rotate it in AuthSec and update the MCP server config.
+
+API equivalent:
+
+```bash
+curl -X POST '<AUTHSEC_API_ORIGIN>/authsec/resource-servers' \
+  -H 'Authorization: Bearer <admin_jwt>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "GitHub MCP Server",
+    "public_base_url": "<RESOURCE_SERVER_ORIGIN>",
+    "protected_base_path": "/mcp",
+    "scopes_supported": [
+      "repos:read",
+      "repos:write",
+      "issues:read",
+      "issues:write",
+      "pull_requests:read",
+      "pull_requests:write",
+      "actions:read",
+      "actions:write",
+      "security:read",
+      "admin:write"
+    ],
+    "registration_modes": ["dcr", "prereg", "cimd"]
+  }'
+```
+
+## Step 2: Configure The SDK
+
+Use the AuthSec resource server values directly:
+
+| SDK field | Value |
+|---|---|
+| `Issuer` | JWT issuer, normally `<AUTHSEC_API_ORIGIN>` |
+| `AuthorizationServer` | AuthSec base used for metadata and SDK admin calls |
+| `JWKSURL` | `<AUTHSEC_API_ORIGIN>/oauth/jwks` |
+| `IntrospectionURL` | `<AUTHSEC_API_ORIGIN>/oauth/introspect` |
+| `IntrospectionClientID` | the AuthSec resource server UUID |
+| `IntrospectionClientSecret` | the resource server introspection secret |
+| `ResourceURI` | exact AuthSec `resource_uri` |
+| `ResourceName` | display name shown in metadata |
+| `ResourceServerID` | the same resource server UUID |
+| `SupportedScopes` | same list as AuthSec `scopes_supported` |
+
+Important:
+
+- `IntrospectionClientID` is the resource server ID.
+- `ResourceURI` must exactly match the AuthSec resource URI and the JWT audience.
+- `AuthorizationServer` is also used for SDK calls like `/authsec/resource-servers/<id>/sdk-policy` and `/sdk-manifest`.
+- `SupportedScopes` should not contain GitHub PAT scopes like `repo` or `workflow`; use the product scopes you created in AuthSec, such as `repos:read` and `actions:write`.
+
+## Step 3: Publish Tool Inventory
+
+AuthSec needs tool inventory before admins can map tools to scopes and activate the resource server.
+
+There are three ways to populate inventory:
+
+1. SDK manifest publish: recommended for protected MCP servers.
+2. Authenticated scan: admin provides a token and AuthSec calls `tools/list`.
+3. Manual entry: admin creates tools in the dashboard.
+
+For production, prefer SDK manifest publish:
 
 ```go
-protected, err := authsecsdk.WrapMCPHTTP(mcpHandler, cfg)
-if err != nil {
-    log.Fatal(err)
-}
+cfg.PublishManifest = true
+```
 
+When `PublishManifest` is true, `MountMCP` and `WrapMCPHTTP` call `PublishManifest` in the background. The SDK sends:
+
+```text
+PUT <AUTHSEC_API_ORIGIN>/authsec/resource-servers/<resource-server-id>/sdk-manifest
+Authorization: Basic base64(<resource-server-id>:<introspection-secret>)
+```
+
+The manifest contains:
+
+```json
+{
+  "tools": [
+    {
+      "name": "search_repositories",
+      "title": "Search repositories",
+      "description": "Find GitHub repositories...",
+      "input_schema": {},
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "suggested_scopes": ["repos:read"]
+    }
+  ]
+}
+```
+
+### Synthetic Enumeration
+
+By default, the SDK enumerates tools from the unwrapped MCP handler:
+
+1. `initialize`
+2. `notifications/initialized`
+3. paginated `tools/list`
+
+This bypasses the AuthSec wrapper but still goes through your inner MCP handler. It works for most HTTP MCP servers.
+
+### ToolInventoryProvider
+
+Use `ToolInventoryProvider` when synthetic enumeration does not fit your server, for example:
+
+- your handler requires custom internal auth even before AuthSec wrapping
+- your MCP server uses a router that does not behave correctly under `httptest`
+- your inventory is static and available from an internal registry
+- you want exact suggested scopes per tool
+
+Example:
+
+```go
+cfg.PublishManifest = true
+cfg.ToolInventoryProvider = func() ([]authsecsdk.ManifestTool, error) {
+	return []authsecsdk.ManifestTool{
+		{
+			Name:            "search_repositories",
+			Description:     "Find repositories by name, topic, or metadata.",
+			SuggestedScopes: []string{"repos:read"},
+		},
+		{
+			Name:            "create_issue",
+			Description:     "Create a GitHub issue.",
+			SuggestedScopes: []string{"issues:write"},
+		},
+	}, nil
+}
+```
+
+If a provider tool has `SuggestedScopes`, those suggestions are published as-is. If not, the SDK falls back to `ToolScopeSuggestions[tool.Name]`.
+
+### ToolScopeSuggestions vs ToolScopes
+
+These fields are intentionally different:
+
+| Field | Purpose |
+|---|---|
+| `ToolScopeSuggestions` | Admin-facing suggestions sent in the SDK manifest. They are advisory only. |
+| `ToolScopes` | Runtime local fallback policy used by the SDK when configured. |
+
+Suggested scopes do not grant access by themselves. In AuthSec, admins still need to apply mappings or explicitly mark tools public before activation.
+
+## Step 4: Configure Tool Policy In AuthSec
+
+After the server starts, check the Resource Server onboarding wizard:
+
+1. Register: resource server exists.
+2. Tool inventory: tools arrived through SDK manifest or scan.
+3. Define scopes: scopes exist.
+4. Map tools to scopes: every non-public tool has at least one effective mapping.
+5. Default role: default access policy grants at least one scope.
+6. Activate: resource server can be moved to `ready`.
+
+For SDK manifest tools:
+
+- `suggested_scopes` are displayed as suggestions.
+- Runtime policy only uses effective admin mappings.
+- Suggested mappings should not be treated as grants until accepted by an admin.
+- If a tool should require no scope, mark it public intentionally.
+
+When the resource server is not `ready`, `/sdk-policy` returns `policy_complete=false`; the SDK treats this as deny-all for remote policy.
+
+## Step 5: Runtime Enforcement
+
+At startup the SDK fetches policy:
+
+```text
+GET <AUTHSEC_API_ORIGIN>/authsec/resource-servers/<resource-server-id>/sdk-policy
+Authorization: Basic base64(<resource-server-id>:<introspection-secret>)
+```
+
+Expected response:
+
+```json
+{
+  "state": "ready",
+  "policy_complete": true,
+  "rs_id": "<resource-server-id>",
+  "generation": 12,
+  "tool_policy": [
+    {
+      "name": "search_repositories",
+      "is_public": false,
+      "required_scopes": ["repos:read"]
+    }
+  ],
+  "ttl_seconds": 300
+}
+```
+
+The `tool_policy` array is authoritative.
+
+Runtime behavior:
+
+- `tools/list`: SDK filters the server response to tools the caller can see.
+- `tools/call`: SDK blocks unauthorized tool calls before they reach your handler.
+- unknown tool in policy mode: denied.
+- explicitly public tool: allowed for any valid AuthSec token.
+- policy unavailable and no usable cache: HTTP 503.
+- insufficient scope: HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope"`.
+
+## Policy Modes
+
+| Mode | Behavior |
+|---|---|
+| `PolicyModeRemoteRequired` | Fetch AuthSec policy. Startup fails unless initial fetch succeeds, except when `PublishManifest=true` and the RS is still being set up. |
+| `PolicyModeRemoteWithLocalFallback` | Prefer AuthSec policy. If unavailable, use `ToolScopes`. Requires non-nil `ToolScopes`. |
+| `PolicyModeLocalOnly` | Use only local `ToolScopes`. |
+| `PolicyModeOpen` | No per-tool authorization; any valid AuthSec token can call tools. |
+
+Recommended production default:
+
+```go
+PolicyMode: authsecsdk.PolicyModeRemoteWithLocalFallback
+```
+
+Use `PolicyModeRemoteRequired` after onboarding if you want the server to hard-fail when AuthSec policy cannot be fetched.
+
+## Validation Modes
+
+| Mode | Behavior |
+|---|---|
+| `ValidationModeJWTAndIntrospect` | JWT-shaped tokens must pass JWKS verification, then introspection. Opaque tokens use introspection. Recommended. |
+| `ValidationModeJWTOrIntrospect` | Either JWT verification or introspection may pass. Use only for migration. |
+| `ValidationModeJWTOnly` | JWKS validation only; revocation visibility is bounded by token lifetime. |
+| `ValidationModeIntrospectionOnly` | Introspection only. |
+
+Recommended:
+
+```go
+ValidationMode: authsecsdk.ValidationModeJWTAndIntrospect
+```
+
+Security note: in `ValidationModeJWTAndIntrospect`, introspection cannot rescue a JWT-shaped token that fails local signature verification.
+
+## Principal Context
+
+After validation, the SDK stores the AuthSec principal in the request context:
+
+```go
+principal, ok := authsecsdk.PrincipalFromContext(r.Context())
+if ok {
+	log.Printf("subject=%s scopes=%v", principal.Subject, principal.Scopes)
+}
+```
+
+Use this for audit logs, tenant routing, or application-level context. Do not use it to bypass SDK authorization.
+
+## Manual Wiring
+
+Use `MountMCP` unless you need custom router behavior.
+
+If you use `WrapMCPHTTP` directly, also mount metadata:
+
+```go
 rt, err := authsecsdk.NewRuntime(cfg)
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
 
-mux := http.NewServeMux()
-// Mount the metadata route explicitly — MountMCP does this for you automatically.
+protected := rt.Wrap(mcpHandler)
+
 mux.Handle(authsecsdk.BuildResourceMetadataPath(cfg.ResourceURI), rt.ProtectedResourceHandler())
 mux.Handle("/mcp", protected)
-mux.Handle("/mcp/", protected)
 ```
 
-Omitting the metadata handler means MCP clients cannot discover the authorization
-server and the OAuth flow will not start correctly.
+Omitting protected-resource metadata breaks OAuth discovery for MCP clients.
 
-### What this does automatically
+## Verification Checklist
 
-With the SDK in place:
-
-- the protected-resource metadata route is registered at the correct path (see above)
-- unauthenticated clients receive `WWW-Authenticate: Bearer ... resource_metadata=...`
-- AuthSec access tokens are validated (JWT + introspection, configurable via `ValidationMode`)
-- the authenticated principal is injected into request context
-- the tool→scope mapping is fetched from AuthSec at startup and cached (5-minute TTL by default)
-- unauthorized tools are filtered out of `tools/list` responses
-- unauthorized `tools/call` requests are rejected with HTTP 403 `insufficient_scope`
-- policy backend failures return HTTP 503 (distinct from authorization failures)
-
-Keep `SupportedScopes` aligned with the resource server's `scopes_supported` values
-in AuthSec; those values are echoed back to clients in the protected-resource metadata.
-
-## Step 4: How tool authorization works
-
-AuthSec is the single source of truth for which scopes each MCP tool requires. This
-mapping is managed in the AuthSec Scope Matrix UI (see Step 6).
-
-### How it works at runtime
-
-1. **Startup**: The SDK fetches the tool→scope mapping from
-   `{AuthorizationServer}/authsec/resource-servers/{ResourceServerID}/sdk-policy`
-   using the same credentials as introspection. The mapping is cached with a
-   5-minute TTL by default.
-
-2. **`tools/list`**: The SDK intercepts the response from your MCP server, checks
-   each tool against the principal's RBAC-resolved scopes, and filters out tools the
-   user cannot access.
-
-3. **`tools/call`**: The SDK checks whether the principal has the required scopes for
-   the requested tool. If not, it returns HTTP 403 with
-   `WWW-Authenticate: Bearer error="insufficient_scope"`.
-
-4. **Live RBAC**: When `IntrospectionURL` is configured, the SDK introspects on each
-   request and AuthSec re-resolves the user's RBAC permissions on every introspection
-   call. If an admin revokes a role, the next MCP request can be rejected as inactive
-   or returned with reduced scopes depending on the introspection result. If
-   `IntrospectionURL` is not configured, revocation visibility is bounded by token
-   lifetime.
-
-### Deny-by-default
-
-When a tool policy exists (any `PolicyMode` other than `PolicyModeOpen`), tools
-absent from the mapping are **denied**. This is intentional and distinct from
-explicitly-public tools:
-
-| Tool entry in mapping | Result |
-|---|---|
-| `"tool": {"scope:a"}` — scoped | allowed only if principal has `scope:a` |
-| `"tool": {}` — explicit empty slice | allowed for any valid token (public tool) |
-| *(absent from map)* | denied — HTTP 403 |
-
-To mark a tool as intentionally public (no scope required), add an explicit empty
-slice entry:
-
-```go
-authsecsdk.ToolScopeMap{
-    "get_status":    {},           // explicitly public — any valid token
-    "list_issues":   {"issues:read"},
-    "create_issue":  {"issues:write"},
-}
-```
-
-Omitting a tool name entirely is different: it is treated as an unknown tool and
-denied when any policy is active.
-
-### PolicyMode
-
-`PolicyMode` controls which policy source the SDK uses. Set it explicitly for clarity;
-when unset it is inferred from the other config fields.
-
-| Mode | Behavior |
-|---|---|
-| `PolicyModeRemoteRequired` *(default when `ResourceServerID` set)* | Fetch from AuthSec at startup; startup fails if the fetch fails or credentials are missing. Serve from cache at runtime; return HTTP 503 if cache is unavailable. |
-| `PolicyModeRemoteWithLocalFallback` | Same startup fetch; on failure, fall back to `ToolScopes`. Requires both `ResourceServerID` and a non-nil `ToolScopes`. |
-| `PolicyModeLocalOnly` *(default when only `ToolScopes` set)* | Use `ToolScopes` only; `ResourceServerID` is ignored. |
-| `PolicyModeOpen` *(default when neither is set)* | No tool-level policy; all tools are allowed for any valid token. |
-
-```go
-authsecsdk.Config{
-    // ... other fields ...
-    PolicyMode: authsecsdk.PolicyModeRemoteWithLocalFallback,
-    ResourceServerID: "<resource-server-uuid>",
-    ToolScopes: authsecsdk.ToolScopeMap{
-        "list_issues":  {"issues:read"},
-        "create_issue": {"issues:write"},
-    },
-}
-```
-
-**`PolicyModeRemoteWithLocalFallback` requires both sides of the contract**: if
-`ToolScopes` is nil the SDK returns an error at startup — there is no local fallback
-to fall back to.
-
-### Policy backend failures
-
-When the remote scope matrix is unavailable (fetch error, cache expired past the
-stale bound), the SDK returns **HTTP 503** rather than silently allowing or denying
-requests. This is distinct from an authorization failure (HTTP 403). Monitor for 503s
-as a sign of a degraded policy backend, not a token or scope problem.
-
-### Cache TTL and stale serving
-
-The default cache TTL is 5 minutes. Stale data is served during background refresh
-for up to 30 minutes after the last successful fetch. After 30 minutes of persistent
-fetch failures, the SDK returns 503 rather than serving indefinitely stale policy.
-
-```go
-authsecsdk.Config{
-    // ... other fields ...
-    ScopeMatrixTTL: 2 * time.Minute,
-}
-```
-
-## Step 5: Validation and revocation semantics
-
-### ValidationMode
-
-`ValidationMode` controls how the SDK combines JWT verification and token
-introspection. Set it explicitly for clarity; when unset it is inferred from the
-available URLs.
-
-| Mode | Behavior |
-|---|---|
-| `ValidationModeJWTAndIntrospect` *(default when both URLs set)* | **JWT-shaped tokens**: local JWT verification must pass first — a JWT that fails signature verification is **not** rescued by introspection. On JWT success, introspection is called for revocation check. **Opaque tokens**: introspection is used directly. Requires both `JWKSURL` and `IntrospectionURL`. |
-| `ValidationModeJWTOrIntrospect` | Either path may succeed independently (legacy permissive mode). A JWT that fails local verification can be rescued by a passing introspection response. Use this only during migration from the old behavior. |
-| `ValidationModeJWTOnly` *(default when only `JWKSURL` set)* | Local JWT verification only. Revocation is bounded by token lifetime. Requires `JWKSURL`. |
-| `ValidationModeIntrospectionOnly` *(default when only `IntrospectionURL` set)* | Token introspection only. Supports opaque tokens. Requires `IntrospectionURL` and credentials. |
-
-```go
-authsecsdk.Config{
-    // ... other fields ...
-    // Explicit strict mode (also the inferred default when both URLs are set):
-    ValidationMode: authsecsdk.ValidationModeJWTAndIntrospect,
-    JWKSURL:        "<AUTHSEC_API_ORIGIN>/oauth/jwks",
-    IntrospectionURL: "<AUTHSEC_API_ORIGIN>/oauth/introspect",
-    IntrospectionClientID:     "resource-server",
-    IntrospectionClientSecret: "<introspection-secret-from-authsec>",
-}
-```
-
-For strong revocation behavior, configure both `JWKSURL` and `IntrospectionURL`
-(default mode: `ValidationModeJWTAndIntrospect`). If you omit introspection, the SDK
-validates JWTs locally only and revocation is bounded by token lifetime.
-
-The key security property of `ValidationModeJWTAndIntrospect`: **introspection cannot
-rescue a JWT-shaped token that fails local signature verification**. If a token
-presents as a JWT (three dot-separated segments) and the local JWKS check fails, the
-request is rejected immediately — introspection is not attempted. This prevents a
-compromised or misconfigured introspection endpoint from being used to bypass local
-cryptographic verification.
-
-For opaque tokens (not JWT-shaped) in `ValidationModeJWTAndIntrospect` mode,
-introspection is used directly since there is no local JWT to verify.
-
-## Step 6: Keep upstream credentials separate
-
-The client access token presented to your MCP server should be an AuthSec token.
-
-Do not forward that token to your upstream system.
-
-The intended production model is:
-
-- incoming bearer token: AuthSec access token
-- upstream application credential: server-side PAT, API key, GitHub App token, or org-managed credential
-
-That separation matters because:
-
-- AuthSec token proves who the MCP client user is and what they can do
-- upstream credential is the server-side operational identity used to execute real work
-
-Those are different concerns and should remain separate.
-
-AuthSec manages consent grants. The MCP server never stores consent state. Consent can be viewed, managed, and revoked in the AuthSec console under **Consent Grants** (accessible from Authz / RBAC in the sidebar).
-
-## Step 7: Configure scopes and RBAC in AuthSec
-
-This is the critical step that connects your resource server to the full AuthSec authorization model. All of this happens in the AuthSec console — the MCP server itself does not need changes.
-
-### 1. Scopes: auto-discover and map tools
-
-Navigate to **Resource Servers** → select your RS → **Scope Matrix**.
-
-AuthSec auto-discovers your MCP tools by calling `tools/list` on your resource server. Click **Rescan** to trigger discovery. The Scope Matrix shows a grid of tools × scopes:
-
-- Each row is a discovered MCP tool
-- Each column pill is an OAuth scope mapped to that tool
-- `auto_matched` scopes are shown with an indicator
-- Click a scope pill to edit its metadata (display name, description, risk level)
-- Use the **Map Scope** dropdown per tool to assign or remove scopes
-
-You can also create custom scopes from this page if the auto-discovered set is insufficient.
-
-### 2. Permissions: create resource:action pairs
-
-Navigate to **Authz / RBAC** → **Permissions**.
-
-Create permissions that represent fine-grained actions, for example:
-
-- `github:issues:read`
-- `github:repos:write`
-
-### 3. Roles: group permissions into roles
-
-Navigate to **Authz / RBAC** → **Roles**.
-
-Create roles that bundle permissions, for example:
-
-- `github-viewer` → `github:issues:read`, `github:repos:read`
-- `github-admin` → all permissions
-
-### 4. Role Bindings: assign roles to users
-
-Navigate to **Authz / RBAC** → **Role Bindings**.
-
-Bind roles to specific users. This determines what each user is allowed to do.
-
-### 5. Scope-Permission mapping: link permissions to OAuth scopes
-
-In the Scope Matrix, scopes can be linked to permissions. When a scope is granted, the associated permissions are included in the resolved access.
-
-### 6. Resolution chain
-
-When a token is issued, AuthSec resolves the effective scopes as:
-
-```
-effective_scopes = requested_scopes ∩ RS.scopes_supported ∩ user_effective_scopes
-```
-
-Where `user_effective_scopes` is derived from the user's role bindings → permissions → scope mappings.
-
-### 7. Live revocation
-
-With introspection enabled, role removal is reflected on the next introspection
-call. Without introspection, revocation is bounded by JWT lifetime because the
-SDK is validating locally from JWKS only.
-
-## Step 8: Point MCP clients at your server
-
-Once your MCP server is wrapped and deployed at:
-
-- `<RESOURCE_SERVER_ORIGIN>/mcp`
-
-standard MCP clients should discover AuthSec through the SDK-emitted protected-resource metadata.
-
-The intended flow is:
-
-1. client hits the MCP endpoint unauthenticated
-2. SDK returns a bearer challenge with `resource_metadata`
-3. client discovers the AuthSec authorization server
-4. client completes OAuth against AuthSec
-5. client retries with an AuthSec access token
-6. SDK validates the token and enforces tool authorization
-
-This is why the SDK owns the `.well-known` protected-resource behavior.
-
-The MCP developer should not have to wire that manually.
-
-## Step 9: Manage users and access in AuthSec
-
-After the SDK is in front of your MCP server, user and access management should move to AuthSec.
-
-In the AuthSec console, the relevant areas are:
-
-- **Users** — create or manage operator identities
-- **Identity Providers** — configure Google, GitHub, Microsoft, OIDC, SAML, and other upstream login methods
-- **Resource Servers** — register the MCP server, view the Scope Matrix for tool-scope mappings, view nested OAuth clients, rotate introspection secrets
-- **Permissions** — define fine-grained resource:action pairs
-- **Roles** — group permissions into named roles
-- **Role Bindings** — assign roles to users with optional conditions
-- **Consent Grants** — view and revoke user-granted consents per client per resource server
-
-The operational model should be:
-
-- your MCP server stays thin
-- AuthSec decides who the caller is
-- AuthSec decides which scopes are granted (via RBAC resolution)
-- the SDK enforces those grants at the MCP boundary
-- consent and access can be revoked in real time from the console
-
-## Step 9: Verify the integration
-
-### Check the protected-resource metadata
-
-For a path-based resource (e.g. `ResourceURI: <RESOURCE_SERVER_ORIGIN>/mcp`), the
-metadata is served at the path-derived alias:
+### 1. Metadata
 
 ```bash
 curl -i '<RESOURCE_SERVER_ORIGIN>/.well-known/oauth-protected-resource/mcp'
 ```
 
-For a root resource (no path in `ResourceURI`), it is at the bare path:
+Expected:
 
-```bash
-curl -i '<RESOURCE_SERVER_ORIGIN>/.well-known/oauth-protected-resource'
-```
+- `200 OK`
+- JSON includes `resource: "<RESOURCE_URI>"`
+- JSON includes `authorization_servers: ["<AUTHSEC_API_ORIGIN>"]`
 
-Use `authsecsdk.BuildResourceMetadataURL(cfg.ResourceURI)` to compute the correct
-URL programmatically. The bare `/.well-known/oauth-protected-resource` path is **not**
-served for path-based resources.
-
-### Check the AuthSec discovery document
-
-```bash
-curl '<AUTHSEC_API_ORIGIN>/.well-known/oauth-authorization-server'
-curl '<AUTHSEC_API_ORIGIN>/.well-known/openid-configuration'
-```
-
-### Check the server challenge
-
-Call the MCP endpoint without a bearer token and inspect the response headers:
+### 2. Unauthenticated Challenge
 
 ```bash
 curl -i -X POST '<RESOURCE_SERVER_ORIGIN>/mcp' \
@@ -717,95 +486,174 @@ curl -i -X POST '<RESOURCE_SERVER_ORIGIN>/mcp' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
-You should see a bearer challenge with a `resource_metadata` reference.
+Expected:
 
-### Check authorized vs unauthorized tools
+- `401 Unauthorized`
+- `WWW-Authenticate` contains `Bearer`
+- `WWW-Authenticate` contains `resource_metadata=`
 
-With a valid AuthSec token that lacks write scopes:
+### 3. SDK Manifest
 
-- `tools/list` should hide write tools
-- `tools/call` for a write tool should fail with `insufficient_scope`
+In AuthSec:
 
-### Verify RBAC end-to-end
+- Resource Server -> Onboarding -> Tool inventory
+- or `GET /authsec/resource-servers/<id>/sdk-manifest-status`
 
-1. Create a permission (e.g., `github:issues:read`)
-2. Create a role that includes that permission
-3. Create a role binding assigning the role to a user
-4. Map the permission to an OAuth scope in the Scope Matrix
-5. Obtain a token for that user — verify the token includes the expected scope
-6. Remove the role binding
-7. Call introspect — verify the token returns `active: false`
+Expected:
 
-### Verify consent management
+- `never_seen=false`
+- latest attempt `status=success`
+- `tool_count > 0`
 
-1. Authorize a client against your resource server
-2. Check the consent grant appears in the AuthSec console under **Consent Grants**
-3. Revoke the consent grant from the console
-4. Verify the client is re-prompted for authorization on next access
+### 4. Scope Matrix
 
-### Verify tool filtering with RBAC
+Expected after manifest publish:
 
-1. Obtain a token with limited scopes (e.g., only `issues:read`)
-2. Call `tools/list` — verify only tools mapped to `issues:read` are visible
-3. Call `tools/call` on an unauthorized tool (e.g., one requiring `admin:write`) — verify the SDK returns `insufficient_scope`
+- tools visible in the matrix
+- suggestions visible for tools that published `suggested_scopes`
+- activation still blocked until mappings are effective
 
-## Example development configuration
+### 5. Authorized Tool List
 
-Use values like these unless your deployment topology differs:
+With a valid token that only resolves to `repos:read`:
+
+- read-only repository tools are visible
+- write tools are hidden
+
+### 6. Unauthorized Tool Call
+
+Call a write tool with a read-only token.
+
+Expected:
+
+- HTTP 403
+- `WWW-Authenticate` includes `insufficient_scope`
+
+## Common Failure Modes
+
+### AuthSec shows zero tools
+
+Likely causes:
+
+- `PublishManifest` is false.
+- `ToolInventoryProvider` returns an empty list.
+- synthetic enumeration cannot call your inner MCP handler.
+- `IntrospectionClientID` or secret is wrong, so `/sdk-manifest` returns 401.
+- `AuthorizationServer` points to the wrong AuthSec origin.
+- the server was deployed before the SDK manifest code ran.
+
+Fix:
+
+- enable `PublishManifest`
+- check server logs for `manifest publish failed`
+- check `/sdk-manifest-status`
+- use `ToolInventoryProvider` for static inventory or custom routing
+
+### Protected unauthenticated scan returns success but zero tools
+
+This is expected for a correctly protected MCP server. AuthSec cannot list tools anonymously when your MCP server returns `401`. Use SDK manifest publishing or authenticated scan.
+
+### Tools appear but activation is blocked
+
+Inventory is present, but one or more gates are incomplete:
+
+- tools are unmapped
+- scopes do not exist
+- default access role grants no scopes
+- non-public tools have only suggestions, not effective mappings
+
+Apply suggested mappings or manually map each tool to at least one scope, then activate.
+
+### `tools/list` returns no tools for a user
+
+Likely causes:
+
+- resource server is not `ready`
+- user has no role binding
+- role has permissions, but permissions are not linked to OAuth scopes
+- requested OAuth scope does not intersect with user effective scopes
+- token audience does not match `ResourceURI`
+
+AuthSec effective scopes are:
 
 ```text
-Issuer=<AUTHSEC_API_ORIGIN>
-AuthorizationServer=<AUTHSEC_API_ORIGIN>
-JWKSURL=<AUTHSEC_API_ORIGIN>/oauth/jwks
-IntrospectionURL=<AUTHSEC_API_ORIGIN>/oauth/introspect
-ResourceURI=<RESOURCE_SERVER_ORIGIN>/mcp
-ResourceName=GitHub MCP Server
-ResourceServerID=<resource-server-uuid>
+requested_scopes ∩ resource_server.scopes_supported ∩ user_effective_scopes
 ```
 
-For introspection:
+### Startup fails fetching policy
 
-- `IntrospectionClientID`: use `resource-server`
-- `IntrospectionClientSecret`: use the `introspection_secret` returned by AuthSec when you created or rotated the resource server secret
+If the resource server is still in onboarding, either:
 
-If your AuthSec deployment uses a different introspection client ID convention, update that field accordingly.
+- set `PublishManifest=true`, so the SDK can start while policy is incomplete
+- or use `PolicyModeRemoteWithLocalFallback` with non-nil `ToolScopes`
 
-## Explicit dev example
+### Metadata path is 404
 
-For the current dev environment described in this repo, the placeholders above map to:
+Check `ResourceURI`.
+
+- `https://mcp.example.com/mcp` -> `/.well-known/oauth-protected-resource/mcp`
+- `https://mcp.example.com` -> `/.well-known/oauth-protected-resource`
+
+## Production Checklist
+
+- Resource server exists in AuthSec.
+- `ResourceURI` exactly matches the public MCP endpoint and token audience.
+- `IntrospectionClientID` is the resource server ID.
+- `IntrospectionClientSecret` is stored securely.
+- `SupportedScopes` matches AuthSec `scopes_supported`.
+- `PublishManifest=true`.
+- `ToolScopeSuggestions` or `ToolInventoryProvider` provides sensible suggestions.
+- Every non-public tool is mapped in AuthSec before activation.
+- Default access policy grants at least one useful scope.
+- `ValidationModeJWTAndIntrospect` is used unless there is a specific reason not to.
+- Server logs manifest publish success on startup.
+- `/sdk-manifest-status` shows success.
+- `tools/list` and `tools/call` are tested with read-only and write-capable users.
+
+## Development Example
+
+For the current dev environment:
 
 ```text
 AUTHSEC_API_ORIGIN=https://dev.api.authsec.dev
 RESOURCE_SERVER_ORIGIN=https://20-106-226-245.sslip.io
+RESOURCE_URI=https://20-106-226-245.sslip.io/mcp
 ```
 
-## What you do not need to build yourself
+Metadata URL:
 
-If you use this SDK, you should not need to separately implement:
+```text
+https://20-106-226-245.sslip.io/.well-known/oauth-protected-resource/mcp
+```
 
-- PRM metadata routes
+Protected MCP endpoint:
+
+```text
+https://20-106-226-245.sslip.io/mcp
+```
+
+AuthSec SDK policy:
+
+```text
+https://dev.api.authsec.dev/authsec/resource-servers/<resource-server-id>/sdk-policy
+```
+
+SDK manifest:
+
+```text
+https://dev.api.authsec.dev/authsec/resource-servers/<resource-server-id>/sdk-manifest
+```
+
+## What You Should Not Build Yourself
+
+When using this SDK, do not separately implement:
+
+- OAuth protected-resource metadata
 - bearer challenge construction
-- AuthSec token parsing and validation
-- per-tool scope filtering boilerplate
-- tool→scope mapping maintenance (AuthSec manages this)
+- AuthSec JWT parsing
+- introspection calls
+- `tools/list` filtering middleware
+- `tools/call` scope checks
+- SDK manifest upload logic
 
-That is the whole point of the SDK.
-
-## Integration model
-
-This package is intended to be integrated into a Go-based MCP server.
-
-The integration sequence is:
-
-1. register the resource server in AuthSec
-2. configure scopes and RBAC in the AuthSec console
-3. wrap the server with the SDK
-4. deploy it
-5. let AuthSec handle users, scopes, and access
-
-For a GitHub MCP server, the next integration step is to connect:
-
-- SDK principal and tool authorization
-- existing server-side GitHub credential handling
-
-without changing the AuthSec endpoint contract documented above.
+Keep your MCP server focused on MCP tools and upstream execution. Let AuthSec and the SDK own identity, OAuth, RBAC, consent, inventory, and enforcement at the boundary.

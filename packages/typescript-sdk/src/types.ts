@@ -47,14 +47,14 @@ export interface ToolDefinition {
 export class SimpleSession {
   sessionId: string;
   accessToken: string | null;
-  tenantId: string | null;
+  workspaceId: string | null;
   userId: string | null;
   orgId: string | null;
 
   constructor(sessionId: string, userInfo: Record<string, any>) {
     this.sessionId = sessionId;
     this.accessToken = userInfo.access_token ?? null;
-    this.tenantId = userInfo.tenant_id ?? null;
+    this.workspaceId = userInfo.workspace_id ?? null;
     this.userId = userInfo.user_id ?? null;
     this.orgId = userInfo.org_id ?? null;
   }
@@ -63,7 +63,7 @@ export class SimpleSession {
 /** User info extracted from JWT / auth service */
 export interface UserInfo {
   email?: string;
-  tenant_id?: string;
+  workspace_id?: string;
   user_id?: string;
   org_id?: string;
   access_token?: string;

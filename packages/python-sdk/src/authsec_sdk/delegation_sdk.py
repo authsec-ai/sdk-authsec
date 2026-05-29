@@ -137,7 +137,7 @@ class DelegationClient:
 
         Returns:
             Dict with keys: token, spiffe_id, permissions, audience,
-            expires_at, ttl_seconds, client_id, tenant_id, status
+            expires_at, ttl_seconds, client_id, workspace_id, status
 
         Raises:
             DelegationTokenNotFound: No active token for this client_id
@@ -337,7 +337,7 @@ class DelegationClient:
         Decode the JWT-SVID payload (without signature verification) for inspection.
 
         Returns:
-            Dict of JWT claims (sub, permissions, tenant_id, etc.)
+            Dict of JWT claims (sub, permissions, workspace_id, etc.)
         """
         if not self._token:
             return {}
