@@ -158,6 +158,37 @@ class Runtime:
             asyncio.create_task(publish_manifest_safe(self.cfg, rpc_handler=rpc_handler))
 
     # ────────────────────────────────────────────────────────────
+    # Authoritative scope discovery for PRM publishing
+    # ────────────────────────────────────────────────────────────
+
+    async def get_authoritative_scopes(self) -> Optional[list[str]]:
+        """Return the authoritative ``scopes_supported`` list for this RS,
+        fetched from AuthSec via the scope matrix (TTL-cached, refreshed in
+        the background).
+
+        The PRM endpoint uses this so admin-side scope edits in the AuthSec UI
+        propagate to MCP clients within one refresh cycle (≤5 min) — **no code
+        change in the MCP server**.
+
+        Returns ``None`` when:
+
+        * the runtime has no scope matrix client (``policy_mode=local_only`` /
+          ``open``),
+        * the cache has never been populated, or
+        * the cache exceeded ``max_stale_age`` with the last refresh in error.
+
+        Callers (PRM builder) should fall back to ``cfg.supported_scopes``
+        when this returns ``None`` so the server still serves a metadata
+        document.
+        """
+        if self._scope_client is None:
+            return None
+        try:
+            return await self._scope_client.get_scopes_supported()
+        except Exception:
+            return None
+
+    # ────────────────────────────────────────────────────────────
     # Token validation + tool authorization
     # ────────────────────────────────────────────────────────────
 
@@ -249,7 +280,12 @@ def mount_mcp(
     metadata_path = build_resource_metadata_path(cfg.resource_uri)
 
     async def _metadata(_request: Request) -> Response:
-        body, headers = metadata_json_response(rt.cfg)
+        # PRM is served from the runtime's scope-matrix cache so admin-side
+        # scope changes in AuthSec auto-propagate without a redeploy. Falls
+        # back to cfg.supported_scopes only when the cache hasn't populated
+        # (boot race) or when policy_mode=local_only.
+        authoritative = await rt.get_authoritative_scopes()
+        body, headers = metadata_json_response(rt.cfg, authoritative)
         return Response(content=body, media_type="application/json", headers=headers)
 
     # ── Protected MCP route ──────────────────────────────────────────

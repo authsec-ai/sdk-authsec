@@ -44,10 +44,15 @@ type sdkPolicyResponse struct {
 	Reason         string              `json:"reason"`
 	RSID           string              `json:"rs_id"`
 	Generation     int64               `json:"generation"`
-	Tools          map[string][]string `json:"tools"` // legacy back-compat
-	ToolPolicy     []toolPolicyEntry   `json:"tool_policy"`
-	FetchedAt      string              `json:"fetched_at"`
-	TTLSeconds     int                 `json:"ttl_seconds"`
+	// ScopesSupported: authoritative scope list for this RS, served straight
+	// from the AuthSec admin DB. The SDK feeds this into the PRM (RFC 9728)
+	// scopes_supported field so admin-side changes propagate to MCP clients
+	// without a code change. Empty array is legitimate (RS has no scopes yet).
+	ScopesSupported []string            `json:"scopes_supported"`
+	Tools           map[string][]string `json:"tools"` // legacy back-compat
+	ToolPolicy      []toolPolicyEntry   `json:"tool_policy"`
+	FetchedAt       string              `json:"fetched_at"`
+	TTLSeconds      int                 `json:"ttl_seconds"`
 }
 
 // ErrPolicyIncomplete is returned by Fetch / FetchAndCache when the backend
@@ -100,6 +105,11 @@ type ScopeMatrixClient struct {
 
 	mu             sync.RWMutex
 	toolMap        ToolScopeMap
+	// scopesSupported: authoritative scope list cached from AuthSec, used by
+	// the PRM builder. nil = never fetched (boot before first refresh);
+	// empty slice = fetched but no scopes published yet — distinguishable so
+	// the PRM builder can fall back to local config only when truly absent.
+	scopesSupported []string
 	fetchedAt      time.Time
 	lastErr        error
 	lastErrAt      time.Time
@@ -254,8 +264,11 @@ func (c *ScopeMatrixClient) FetchAndCache(ctx context.Context) error {
 	// Policy-incomplete: enforce deny-all by clearing the cached map.
 	// We deliberately do NOT keep the previous map — once the backend signals
 	// the RS is not ready, the SDK must stop authorizing tools immediately.
+	// Clear scopesSupported too: an RS that's not ready hasn't published any
+	// scopes, and the PRM should reflect that.
 	if err != nil {
 		c.toolMap = nil
+		c.scopesSupported = nil
 		c.fetchedAt = time.Time{}
 		c.policyComplete = false
 		c.lastErr = err
@@ -265,12 +278,72 @@ func (c *ScopeMatrixClient) FetchAndCache(ctx context.Context) error {
 	}
 
 	c.toolMap = toolMap
+	// Backend always emits scopes_supported on policy_complete=true. If a
+	// pre-migration backend omits it (nil), keep the previous cached value
+	// so the PRM keeps publishing what it last knew.
+	if payload.ScopesSupported != nil {
+		// Copy to defend against later mutation of the payload.
+		scopes := make([]string, len(payload.ScopesSupported))
+		copy(scopes, payload.ScopesSupported)
+		c.scopesSupported = scopes
+	}
 	c.fetchedAt = now
 	c.policyComplete = true
 	c.lastErr = nil
 	c.lastErrAt = time.Time{}
 	c.nextRefreshAt = time.Time{} // zero = no cooldown; healthy fetches run on TTL schedule
 	return nil
+}
+
+// GetScopesSupported returns the cached authoritative scopes_supported list.
+//
+// Triggers a background refresh on TTL expiry, same as GetCached.
+//
+// Returns nil when:
+//   - the cache has never been populated successfully (boot before first refresh),
+//   - or the cache exceeded maxStaleAge with the last refresh in error.
+//
+// Callers (the PRM builder) should fall back to cfg.SupportedScopes when this
+// returns nil so the server still serves a metadata document at boot.
+//
+// Admin adds/removes a scope in the AuthSec UI → SDK picks it up on next
+// matrix refresh (TTL ≤ 5 min) → PRM auto-updates → OAuth client sees it.
+// **No code change in the MCP server.**
+func (c *ScopeMatrixClient) GetScopesSupported(ctx context.Context) []string {
+	c.mu.RLock()
+	scopes := c.scopesSupported
+	fetchedAt := c.fetchedAt
+	lastErr := c.lastErr
+	nextRefreshAt := c.nextRefreshAt
+	c.mu.RUnlock()
+
+	now := time.Now()
+	age := now.Sub(fetchedAt)
+	expired := age > c.ttl
+
+	if expired && now.After(nextRefreshAt) && c.refreshing.CompareAndSwap(false, true) {
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = c.FetchAndCache(bgCtx)
+			c.refreshing.Store(false)
+		}()
+	}
+
+	// Same stale-then-error rule as GetCached: never serve data older than
+	// maxStaleAge with a known error condition.
+	if scopes == nil && lastErr != nil {
+		return nil
+	}
+	if scopes != nil && lastErr != nil && age > c.maxStaleAge {
+		return nil
+	}
+	if scopes == nil {
+		return nil
+	}
+	out := make([]string, len(scopes))
+	copy(out, scopes)
+	return out
 }
 
 // GetCached returns the cached tool→scope mapping or an error.

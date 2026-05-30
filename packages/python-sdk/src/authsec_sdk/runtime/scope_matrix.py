@@ -67,6 +67,11 @@ class CacheStatus:
 @dataclass
 class _CacheState:
     tool_map: Optional[ToolScopeMap] = None
+    # Authoritative scope list for this RS, served from AuthSec. Used to
+    # populate the PRM (RFC 9728) scopes_supported field so admin changes
+    # in the AuthSec UI reach MCP clients via discovery without a code
+    # change. None = never fetched; [] = fetched but empty.
+    scopes_supported: Optional[list[str]] = None
     fetched_at: Optional[datetime] = None
     last_err: Optional[Exception] = None
     last_err_at: Optional[datetime] = None
@@ -173,6 +178,9 @@ class ScopeMatrixClient:
         except PolicyIncompleteError as e:
             async with self._lock:
                 self._state.tool_map = None
+                # policy_complete=false means RS has no published scopes;
+                # clear the PRM cache to match.
+                self._state.scopes_supported = None
                 self._state.fetched_at = None
                 self._state.policy_state = e.state
                 self._state.policy_complete = False
@@ -182,7 +190,8 @@ class ScopeMatrixClient:
             raise
         except Exception as e:
             async with self._lock:
-                # Don't touch tool_map; let stale serving rules apply.
+                # Don't touch tool_map or scopes_supported; let stale serving
+                # rules apply so the PRM keeps publishing the last good list.
                 self._state.last_err = e
                 self._state.last_err_at = _now()
                 self._state.next_refresh_at = _now() + self._retry_backoff
@@ -190,6 +199,12 @@ class ScopeMatrixClient:
 
         async with self._lock:
             self._state.tool_map = tool_map
+            # Backend always emits scopes_supported on policy_complete=true.
+            # If a pre-migration backend omits it, leave the previous value
+            # so PRM keeps publishing what it last knew.
+            raw_scopes = payload.get("scopes_supported")
+            if isinstance(raw_scopes, list):
+                self._state.scopes_supported = list(raw_scopes)
             self._state.fetched_at = _now()
             self._state.policy_state = payload.get("state", "ready")
             self._state.policy_complete = True
@@ -232,6 +247,38 @@ class ScopeMatrixClient:
             )
 
         return tool_map
+
+    async def get_scopes_supported(self) -> Optional[list[str]]:
+        """Return the cached scopes_supported list (authoritative from AuthSec).
+
+        Triggers a background refresh on TTL expiry, same as ``get_cached``.
+        Returns ``None`` when the cache has never been populated successfully
+        OR exceeded ``max_stale_age`` with the last refresh in error. Callers
+        (PRM builder) should fall back to ``cfg.supported_scopes`` in that
+        case so the server still serves a metadata document at boot.
+        """
+        async with self._lock:
+            scopes = self._state.scopes_supported
+            fetched_at = self._state.fetched_at
+            last_err = self._state.last_err
+            next_refresh_at = self._state.next_refresh_at
+
+        now = _now()
+        age = (now - fetched_at) if fetched_at is not None else timedelta.max
+
+        expired = age > self._ttl
+        if expired and (next_refresh_at is None or now > next_refresh_at):
+            if not self._refreshing:
+                self._refreshing = True
+                asyncio.create_task(self._background_refresh())
+
+        # Same stale-then-error rule as get_cached: never serve data older
+        # than max_stale_age with a known error condition.
+        if scopes is None and last_err is not None:
+            return None
+        if scopes is not None and last_err is not None and age > self._max_stale_age:
+            return None
+        return list(scopes) if scopes is not None else None
 
     async def cache_status(self) -> CacheStatus:
         async with self._lock:

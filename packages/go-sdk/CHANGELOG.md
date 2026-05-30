@@ -1,5 +1,37 @@
 # Changelog — github.com/authsec-ai/sdk-authsec/packages/go-sdk
 
+## v0.3.0 — Dynamic PRM from AuthSec (admin-driven scopes)
+
+Backend prerequisite: AuthSec ``/sdk-policy`` emits ``scopes_supported`` (live as of this release).
+
+### What's new
+
+- **PRM is now sourced from AuthSec.** The protected-resource metadata's
+  ``scopes_supported`` field is populated from the authoritative AuthSec
+  scope matrix (TTL-cached, refreshed in the background). Admin changes a
+  scope in the AuthSec UI → PRM auto-updates within ≤5 min. **No code
+  change, no redeploy.**
+- **New ``Runtime.GetAuthoritativeScopes(ctx)`` method** returns the live
+  scope list with the same fail-soft semantics as ``GetCached``. Returns
+  ``nil`` when the cache is unpopulated or stale-with-error so callers can
+  fall back to ``cfg.SupportedScopes``.
+- **``ScopeMatrixClient`` now caches ``scopes_supported``** in addition to
+  the tool→scope map. New method ``GetScopesSupported(ctx)``.
+- **``ProtectedResourceHandler`` is wired** to the runtime's cache
+  automatically. Manual users of ``writeMetadata`` should pass the result of
+  ``rt.GetAuthoritativeScopes(ctx)``.
+
+### Migration notes
+
+- ``cfg.SupportedScopes`` is now a **fallback** rather than the source of
+  truth. Customers using ``PolicyModeRemoteRequired`` or
+  ``PolicyModeRemoteWithLocalFallback`` can drop the hardcoded
+  ``SupportedScopes`` slice and rely on AuthSec exclusively (recommended).
+- ``PolicyModeLocalOnly`` keeps the previous behavior — local
+  ``cfg.SupportedScopes`` is authoritative for those deployments.
+- Pre-v0.3.0 backends without ``scopes_supported`` in ``/sdk-policy``
+  continue to work; the SDK falls back to local config transparently.
+
 ## v0.2.0 — Phase A compatibility
 
 Backend prerequisite: AuthSec master migrations 108–112 applied.

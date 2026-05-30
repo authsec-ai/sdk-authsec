@@ -89,9 +89,14 @@ export async function mountMCP(
   }
 
   // ── Metadata route (RFC 9728) ────────────────────────────────────
+  // PRM is served from the runtime's scope-matrix cache so admin-side scope
+  // changes in AuthSec auto-propagate without redeploy. Falls back to
+  // cfg.supportedScopes only when the cache hasn't populated (boot race) or
+  // when policyMode=local_only.
   const metadataPath = buildResourceMetadataPath(cfg.resourceUri);
-  app.get(metadataPath, (_req, res) => {
-    const { body, headers } = metadataJsonResponse(runtime.cfg);
+  app.get(metadataPath, async (_req, res) => {
+    const authoritative = await runtime.getAuthoritativeScopes();
+    const { body, headers } = metadataJsonResponse(runtime.cfg, authoritative);
     for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
     res.status(200).send(body);
   });

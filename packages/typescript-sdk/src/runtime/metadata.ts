@@ -52,13 +52,33 @@ export function isMetadataRequest(resourceUri: string, requestPath: string): boo
   return requestPath === metadataPath || requestPath === metadataPath + '/';
 }
 
-/** Construct the JSON-able metadata payload. */
-export function buildMetadataPayload(cfg: Config): Record<string, unknown> {
+/**
+ * Construct the JSON-able metadata payload (RFC 9728).
+ *
+ * The ``scopes_supported`` field is sourced in this order:
+ *  1. ``authoritativeScopes`` (if non-null) — the live list pulled from
+ *     AuthSec via the scope matrix. **This is the canonical source.**
+ *     Admin changes a scope in the AuthSec UI → SDK refreshes the matrix
+ *     → PRM auto-updates. No code change in the MCP server.
+ *  2. ``cfg.supportedScopes`` — local fallback for boot-time PRM requests
+ *     before the scope matrix has been fetched, or for ``policyMode=local_only``
+ *     deployments that intentionally manage scopes locally.
+ *
+ * Always pass ``authoritativeScopes`` from the runtime when one is available.
+ */
+export function buildMetadataPayload(
+  cfg: Config,
+  authoritativeScopes?: string[] | null,
+): Record<string, unknown> {
+  const scopes =
+    authoritativeScopes && authoritativeScopes.length >= 0
+      ? authoritativeScopes
+      : cfg.supportedScopes;
   return {
     resource: cfg.resourceUri,
     authorization_servers: [cfg.authorizationServer || cfg.issuer],
     resource_name: cfg.resourceName,
-    scopes_supported: [...cfg.supportedScopes],
+    scopes_supported: [...scopes],
     bearer_methods_supported: [...cfg.bearerMethodsSupported],
   };
 }
@@ -126,9 +146,18 @@ export function buildWwwAuthenticate(
   return parts.join(', ');
 }
 
-/** Return [body, headers] for a 200 OK metadata response. */
-export function metadataJsonResponse(cfg: Config): { body: string; headers: Record<string, string> } {
-  const payload = buildMetadataPayload(cfg);
+/**
+ * Return [body, headers] for a 200 OK metadata response.
+ *
+ * Pass ``authoritativeScopes`` from ``runtime.getAuthoritativeScopes()`` so
+ * the PRM advertises the live AuthSec scope list. When omitted (or ``null``),
+ * falls back to ``cfg.supportedScopes`` so legacy callers keep working.
+ */
+export function metadataJsonResponse(
+  cfg: Config,
+  authoritativeScopes?: string[] | null,
+): { body: string; headers: Record<string, string> } {
+  const payload = buildMetadataPayload(cfg, authoritativeScopes);
   return {
     body: JSON.stringify(payload),
     headers: {

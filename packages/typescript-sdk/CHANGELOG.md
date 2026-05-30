@@ -1,5 +1,38 @@
 # Changelog — @authsec/sdk (TypeScript)
 
+## 4.4.0 — Dynamic PRM from AuthSec (admin-driven scopes)
+
+Backend prerequisite: AuthSec ``/sdk-policy`` now emits ``scopes_supported`` (live as of this release).
+
+### What's new
+
+- **PRM is now sourced from AuthSec.** The ``/.well-known/oauth-protected-resource``
+  metadata document's ``scopes_supported`` field is now populated from the
+  authoritative AuthSec scope matrix (TTL-cached, refreshed in the background).
+  Admin adds/removes/renames a scope in the AuthSec UI → PRM auto-updates
+  within ≤5 minutes. **No code change, no redeploy.**
+- **New ``Runtime.getAuthoritativeScopes()`` method** returns the live scope
+  list, with the same fail-soft semantics as ``getCached()``. Returns ``null``
+  when the cache is unpopulated or stale-with-error so callers can fall back
+  to ``cfg.supportedScopes``.
+- **``buildMetadataPayload`` / ``metadataJsonResponse`` accept an
+  ``authoritativeScopes`` argument.** The mountMCP PRM handler passes this
+  automatically; manual users should call ``runtime.getAuthoritativeScopes()``
+  and pass the result.
+- **``ScopeMatrixClient`` now caches ``scopes_supported``** in addition to the
+  tool→scope map. Same TTL / staleAge / retry semantics.
+
+### Migration notes
+
+- ``cfg.supportedScopes`` is now a **fallback** rather than the source of
+  truth. Customers using ``policyMode=remote_required`` or
+  ``remote_with_local_fallback`` can drop their hardcoded ``supportedScopes``
+  array and rely on AuthSec exclusively (recommended).
+- ``policyMode=local_only`` deployments keep the previous behavior — local
+  ``cfg.supportedScopes`` is authoritative for them.
+- Pre-4.4.0 backends without ``scopes_supported`` in ``/sdk-policy`` will
+  continue to work; the SDK falls back to local config transparently.
+
 ## 4.1.0 — Phase A compatibility
 
 Backend prerequisite: AuthSec master migrations 108–112 applied.

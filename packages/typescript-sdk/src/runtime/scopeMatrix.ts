@@ -62,6 +62,18 @@ export interface CacheStatus {
 
 interface CacheState {
   toolMap: ToolScopeMap | null;
+  /**
+   * Authoritative scope list for this RS, served straight from the AuthSec
+   * admin DB. Used to populate the PRM (RFC 9728) ``scopes_supported`` field
+   * so admin-side changes (add/remove/rename a scope in the AuthSec UI) reach
+   * MCP clients via discovery without any code change to the server.
+   *
+   * ``null`` means "never fetched" (boot before first refresh); empty array
+   * means "fetched successfully but no scopes registered" — both are
+   * distinguishable from each other so the PRM builder can decide whether to
+   * fall back to local config.
+   */
+  scopesSupported: string[] | null;
   fetchedAt: Date | null;
   lastErr: Error | null;
   lastErrAt: Date | null;
@@ -76,6 +88,7 @@ interface RawPolicyResponse {
   policy_complete?: boolean;
   reason?: string;
   generation?: number;
+  scopes_supported?: string[];
   tool_policy?: Array<{
     name?: string;
     is_public?: boolean;
@@ -95,6 +108,7 @@ export class ScopeMatrixClient {
 
   private state: CacheState = {
     toolMap: null,
+    scopesSupported: null,
     fetchedAt: null,
     lastErr: null,
     lastErrAt: null,
@@ -195,6 +209,13 @@ export class ScopeMatrixClient {
     try {
       const { toolMap, payload } = await this.fetch();
       this.state.toolMap = toolMap;
+      // Cache the authoritative scope list so the PRM endpoint can serve it.
+      // Backend always emits scopes_supported on policy_complete=true; if a
+      // pre-migration backend omits it, leave the prior cache value alone so
+      // PRM keeps publishing what it last knew.
+      if (Array.isArray(payload.scopes_supported)) {
+        this.state.scopesSupported = [...payload.scopes_supported];
+      }
       this.state.fetchedAt = new Date();
       this.state.policyState = payload.state ?? 'ready';
       this.state.policyComplete = true;
@@ -205,6 +226,10 @@ export class ScopeMatrixClient {
     } catch (e) {
       if (e instanceof PolicyIncompleteError) {
         this.state.toolMap = null;
+        // policy_complete=false means deny-all for tools, AND that the RS
+        // hasn't published any scopes yet. Clear the PRM cache too so we
+        // don't keep advertising scopes for an RS that is no longer ready.
+        this.state.scopesSupported = null;
         this.state.fetchedAt = null;
         this.state.policyState = e.state;
         this.state.policyComplete = false;
@@ -213,12 +238,42 @@ export class ScopeMatrixClient {
         this.state.nextRefreshAt = new Date(Date.now() + this.retryBackoffMs);
         throw e;
       }
-      // Don't touch toolMap; let stale serving rules apply.
+      // Transport / decode failure: leave both toolMap and scopesSupported
+      // intact so previously-good data keeps serving until maxStaleAge.
       this.state.lastErr = e instanceof Error ? e : new Error(String(e));
       this.state.lastErrAt = new Date();
       this.state.nextRefreshAt = new Date(Date.now() + this.retryBackoffMs);
       throw e;
     }
+  }
+
+  /**
+   * Return the cached ``scopes_supported`` list (authoritative from AuthSec).
+   * Triggers a background refresh on TTL expiry, same as ``getCached()``.
+   * Returns ``null`` when the cache has never been populated successfully —
+   * callers (like the PRM builder) should fall back to local ``cfg.supportedScopes``
+   * in that case so the server still serves a metadata document at boot.
+   */
+  async getScopesSupported(): Promise<string[] | null> {
+    const { scopesSupported, fetchedAt, lastErr, nextRefreshAt } = this.state;
+    const now = Date.now();
+    const ageMs = fetchedAt ? now - fetchedAt.getTime() : Number.POSITIVE_INFINITY;
+
+    const expired = ageMs > this.ttlMs;
+    if (expired && (nextRefreshAt === null || now > nextRefreshAt.getTime())) {
+      if (!this.refreshing) {
+        this.refreshing = true;
+        void this.backgroundRefresh();
+      }
+    }
+
+    // Same stale-then-error rule as getCached: never serve data older than
+    // maxStaleAge with a known error condition.
+    if (scopesSupported === null && lastErr !== null) return null;
+    if (scopesSupported !== null && lastErr !== null && ageMs > this.maxStaleAgeMs) {
+      return null;
+    }
+    return scopesSupported ? [...scopesSupported] : null;
   }
 
   /**

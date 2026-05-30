@@ -1,5 +1,35 @@
 # Changelog — authsec-sdk (Python)
 
+## 4.4.0 — Dynamic PRM from AuthSec (admin-driven scopes)
+
+Backend prerequisite: AuthSec ``/sdk-policy`` emits ``scopes_supported`` (live as of this release).
+
+### What's new
+
+- **PRM is now sourced from AuthSec.** The protected-resource metadata's
+  ``scopes_supported`` field is populated from the authoritative AuthSec
+  scope matrix (TTL-cached, refreshed in the background). Admin changes a
+  scope in the AuthSec UI → PRM auto-updates within ≤5 min. **No code
+  change, no redeploy.**
+- **New ``Runtime.get_authoritative_scopes()`` method** returns the live
+  scope list. Returns ``None`` when the cache is unpopulated or
+  stale-with-error so callers can fall back to ``cfg.supported_scopes``.
+- **``ScopeMatrixClient`` now caches ``scopes_supported``** in addition to
+  the tool→scope map. New method ``get_scopes_supported()``.
+- **``mount_mcp`` PRM handler is wired** to the runtime's cache automatically.
+  Manual users of ``metadata_json_response`` should pass the result of
+  ``await rt.get_authoritative_scopes()``.
+
+### Migration notes
+
+- ``cfg.supported_scopes`` is now a **fallback**. Customers using
+  ``policy_mode=remote_required`` or ``remote_with_local_fallback`` can drop
+  their hardcoded ``supported_scopes`` and rely on AuthSec exclusively
+  (recommended).
+- ``policy_mode=local_only`` keeps the previous behavior.
+- Pre-4.4.0 backends without ``scopes_supported`` in ``/sdk-policy`` keep
+  working; the SDK falls back to local config transparently.
+
 ## 4.3.0 — Runtime SDK at Go parity
 
 Major addition: the new ``authsec_sdk.runtime`` subpackage brings the Python

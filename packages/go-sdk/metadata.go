@@ -64,12 +64,29 @@ func isMetadataRequest(resourceURI, path string) bool {
 	return path == metadataPath || path == metadataPath+"/"
 }
 
-func writeMetadata(w http.ResponseWriter, cfg Config) {
+// writeMetadata serves the RFC 9728 protected-resource document.
+//
+// The scopes_supported field is sourced in this order:
+//  1. authoritativeScopes (if non-nil) — the live list pulled from AuthSec
+//     via the scope matrix. **This is the canonical source.** Admin changes
+//     a scope in the AuthSec UI → SDK refreshes the matrix → PRM auto-updates.
+//     No code change in the MCP server.
+//  2. cfg.SupportedScopes — local fallback for boot-time PRM requests before
+//     the scope matrix has been fetched, or for PolicyModeLocalOnly
+//     deployments that intentionally manage scopes locally.
+//
+// Always pass authoritativeScopes from rt.GetAuthoritativeScopes() when one
+// is available.
+func writeMetadata(w http.ResponseWriter, cfg Config, authoritativeScopes []string) {
+	scopes := cfg.SupportedScopes
+	if authoritativeScopes != nil {
+		scopes = authoritativeScopes
+	}
 	metadata := protectedResourceMetadata{
 		Resource:               cfg.ResourceURI,
 		AuthorizationServers:   []string{cfg.AuthorizationServer},
 		ResourceName:           cfg.ResourceName,
-		ScopesSupported:        append([]string(nil), cfg.SupportedScopes...),
+		ScopesSupported:        append([]string(nil), scopes...),
 		BearerMethodsSupported: append([]string(nil), cfg.BearerMethodsSupported...),
 	}
 	w.Header().Set("Content-Type", "application/json")

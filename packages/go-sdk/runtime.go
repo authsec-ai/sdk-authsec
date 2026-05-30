@@ -193,10 +193,33 @@ func (rt *Runtime) maybePublishManifest(inner http.Handler) {
 	})
 }
 
+// GetAuthoritativeScopes returns the authoritative scopes_supported list for
+// this RS, fetched from AuthSec via the scope matrix (TTL-cached, refreshed
+// in the background). The PRM handler uses this so admin-side scope edits in
+// the AuthSec UI propagate to MCP clients within one refresh cycle (≤5 min)
+// — **no code change in the MCP server**.
+//
+// Returns nil when:
+//   - the runtime has no scope matrix client (PolicyModeOpen / PolicyModeLocalOnly),
+//   - the cache has never been populated, or
+//   - the cache exceeded maxStaleAge with the last refresh in error.
+//
+// Callers (PRM handler) should fall back to cfg.SupportedScopes when this
+// returns nil so the server still serves a metadata document.
+func (rt *Runtime) GetAuthoritativeScopes(ctx context.Context) []string {
+	if rt.scopeMatrix == nil {
+		return nil
+	}
+	return rt.scopeMatrix.GetScopesSupported(ctx)
+}
+
 // ProtectedResourceHandler returns the metadata handler for this runtime.
+// PRM is served from the runtime's scope-matrix cache when available so
+// admin-side scope changes in AuthSec auto-propagate without a redeploy.
 func (rt *Runtime) ProtectedResourceHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeMetadata(w, rt.cfg)
+		authoritative := rt.GetAuthoritativeScopes(r.Context())
+		writeMetadata(w, rt.cfg, authoritative)
 	})
 }
 

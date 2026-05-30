@@ -118,6 +118,31 @@ export class Runtime {
     }
   }
 
+  /**
+   * Return the authoritative ``scopes_supported`` list for this RS, fetched
+   * from AuthSec via the scope matrix (TTL-cached, refreshed in the
+   * background). The PRM endpoint uses this so admin-side scope edits in the
+   * AuthSec UI propagate to MCP clients within one refresh cycle (≤5 min) —
+   * **no code change in the MCP server**.
+   *
+   * Returns ``null`` when:
+   *  - the runtime has no scope matrix client (policyMode=local_only / open),
+   *  - the cache has never been populated and there's no usable fallback,
+   *  - the cache exceeded ``maxStaleAge`` with the last refresh in error.
+   *
+   * Callers (PRM builder) should fall back to ``cfg.supportedScopes`` when
+   * this returns ``null`` so the server still serves a metadata document.
+   */
+  async getAuthoritativeScopes(): Promise<string[] | null> {
+    if (this.scopeClient === null) return null;
+    try {
+      return await this.scopeClient.getScopesSupported();
+    } catch {
+      // getScopesSupported is fail-soft and shouldn't throw, but defend.
+      return null;
+    }
+  }
+
   /** Pure token validation; throws ValidationError on failure. */
   async validateToken(token: string): Promise<Principal> {
     const principal = await this.validator.validate(token);
