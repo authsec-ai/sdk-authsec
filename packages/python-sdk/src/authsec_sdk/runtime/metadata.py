@@ -88,17 +88,38 @@ def build_www_authenticate(
     Optionally includes ``error`` and ``error_description`` for
     insufficient_scope / invalid_token responses.
     """
-    parts = [f'Bearer realm="{cfg.resource_name or "AuthSec Protected Resource"}"']
-    parts.append(f'resource_metadata="{build_resource_metadata_url(cfg.resource_uri)}"')
+    realm = cfg.resource_name or "AuthSec Protected Resource"
+    parts = [f'Bearer realm="{_sanitize_header_value(realm)}"']
+    parts.append(
+        f'resource_metadata="{_sanitize_header_value(build_resource_metadata_url(cfg.resource_uri))}"'
+    )
     if error:
-        parts.append(f'error="{error}"')
+        parts.append(f'error="{_sanitize_header_value(error)}"')
     if error_description:
-        # Escape quotes in error_description per RFC 6750.
-        safe = error_description.replace('"', '\\"')
-        parts.append(f'error_description="{safe}"')
+        parts.append(f'error_description="{_sanitize_header_value(error_description)}"')
     if scope:
-        parts.append(f'scope="{scope}"')
+        parts.append(f'scope="{_sanitize_header_value(scope)}"')
     return ", ".join(parts)
+
+
+def _sanitize_header_value(s: str) -> str:
+    """Sanitize a string for an HTTP header field-value (RFC 7230 §3.2.6).
+
+    Field-value MUST NOT contain CR / LF / NUL. ASGI servers + most HTTP
+    libraries enforce this and raise on violation. Hydra and other upstream
+    auth servers leak control chars into error bodies that end up in our
+    ``error_description``; without this guard, the 401 we're trying to send
+    crashes instead of being delivered as a clean denial.
+
+    Strategy:
+      - Replace every control char (0x00–0x1F + 0x7F) with a single space
+      - Escape backslash (must come before quote so we don't double-escape)
+      - Escape double-quote (RFC 7230 quoted-string)
+      - Hard-truncate to 200 chars so the header stays under server limits
+    """
+    out = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)
+    out = out.replace("\\", "\\\\").replace('"', '\\"')
+    return out[:200]
 
 
 def metadata_json_response(

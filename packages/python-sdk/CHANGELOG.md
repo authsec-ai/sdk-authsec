@@ -1,5 +1,27 @@
 # Changelog — authsec-sdk (Python)
 
+## 4.4.2 — Hotfixes: header sanitizer + lower cache TTLs (Phase H-1 / H-2)
+
+**1. WWW-Authenticate header sanitizer (H-1).** ASGI/WSGI servers reject HTTP
+response headers containing CR / LF / NUL (RFC 7230 §3.2.6). When upstream error
+bodies leaked control chars into ``error_description``, ``build_www_authenticate``
+emitted an unparseable header and the server crashed the 401 response instead
+of delivering a clean denial.
+
+  Fix: every attribute in ``build_www_authenticate`` (realm, error,
+  error_description, scope, resource_metadata) now passes through
+  ``_sanitize_header_value`` — control chars (0x00–0x1F + 0x7F) become spaces,
+  backslash + double-quote escape per RFC 7230 quoted-string rules, values
+  truncate to 200 chars.
+
+**2. Lower scope-matrix cache TTLs (H-2).** Default ``scope_matrix_ttl`` drops
+from 5 min to 30 s; stale-with-error window from 30 min to 2 min; retry backoff
+from 30 s to 10 s. Closes the "admin revokes a permission, user keeps calling
+tools for 5 minutes" gap. Customers who need the old behavior for performance
+can override via ``Config.scope_matrix_ttl``.
+
+No API changes. Drop-in upgrade.
+
 ## 4.4.0 — Dynamic PRM from AuthSec (admin-driven scopes)
 
 Backend prerequisite: AuthSec ``/sdk-policy`` emits ``scopes_supported`` (live as of this release).

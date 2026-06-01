@@ -11,10 +11,15 @@ import (
 	"time"
 )
 
+// Tightened defaults in v0.3.1 to close the "revoke a permission, user still has access
+// for 5 min" gap. With these values, admin RBAC changes propagate to MCP servers within
+// <= 30 s in the common case; stale-with-error window is capped at 2 min so a misbehaving
+// AS doesn't leave a server running on outdated policy for half an hour. Customers who
+// want the old behavior for performance can override via Config.ScopeMatrixTTL.
 const (
-	defaultScopeMatrixTTL  = 5 * time.Minute
-	defaultMaxStaleAge     = 30 * time.Minute
-	defaultRetryBackoff    = 30 * time.Second
+	defaultScopeMatrixTTL = 30 * time.Second
+	defaultMaxStaleAge    = 2 * time.Minute
+	defaultRetryBackoff   = 10 * time.Second
 )
 
 // toolPolicyEntry matches the per-tool entry in the `tool_policy` array.

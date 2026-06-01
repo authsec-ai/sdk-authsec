@@ -1,5 +1,21 @@
 # Changelog — github.com/authsec-ai/sdk-authsec/packages/go-sdk
 
+## v0.3.1 — Lower scope-matrix cache TTLs (Phase H-2)
+
+**Lower scope-matrix cache TTLs.** ``defaultScopeMatrixTTL`` drops from 5 min
+to 30 s; ``defaultMaxStaleAge`` from 30 min to 2 min; ``defaultRetryBackoff``
+from 30 s to 10 s. Closes the "admin revokes a permission, user keeps calling
+tools for 5 minutes" gap. Customers who need the old behavior for performance
+can override via ``Config.ScopeMatrixTTL``.
+
+**Note on WWW-Authenticate (H-1).** The TS and Python SDKs both shipped a
+header-sanitizer hotfix in 4.4.2 to defend against control chars leaking from
+upstream error bodies. The Go SDK already uses ``fmt.Sprintf(%q, …)`` for every
+attribute, which performs the same escaping by construction — so no equivalent
+fix is needed here. The bug class doesn't apply.
+
+No API change. Drop-in upgrade.
+
 ## v0.3.0 — Dynamic PRM from AuthSec (admin-driven scopes)
 
 Backend prerequisite: AuthSec ``/sdk-policy`` emits ``scopes_supported`` (live as of this release).

@@ -24,6 +24,29 @@ import { buildResourceMetadataPath, metadataJsonResponse } from './metadata.js';
 import type { Principal } from './principal.js';
 import { Runtime } from './runtime.js';
 
+/**
+ * Set ``WWW-Authenticate`` defensively. The header value comes through
+ * ``buildWwwAuthenticate`` → ``sanitizeHeaderValue`` which already strips
+ * non-ASCII and control chars, but Node's ``setHeader`` is the last line of
+ * defence and historically the one that crashed the request handler when an
+ * unexpected byte slipped through (``TypeError [ERR_INVALID_CHAR]``). The
+ * upstream symptom was that ``/access/assignments`` Revoke produced an HTML
+ * 500 in the MCP client transcript instead of a clean 401. If even the
+ * fallback ``Bearer realm="mcp", error="invalid_token"`` throws, swallow it —
+ * the JSON body that follows still tells the client what happened.
+ */
+function safeSetWwwAuthenticate(res: ExpressLikeResponse, value: string): void {
+  try {
+    res.setHeader('WWW-Authenticate', value);
+  } catch {
+    try {
+      res.setHeader('WWW-Authenticate', 'Bearer realm="mcp", error="invalid_token"');
+    } catch {
+      /* give up on the header; the JSON body below still carries the error. */
+    }
+  }
+}
+
 // Structural Express types — kept loose so we don't hard-depend on @types/express.
 export interface ExpressLikeRequest {
   method: string;
@@ -108,7 +131,7 @@ export async function mountMCP(
 
     const result = await runtime.authorize(token, '');
     if (!result.allowed) {
-      res.setHeader('WWW-Authenticate', result.denial.wwwAuthenticate);
+      safeSetWwwAuthenticate(res, result.denial.wwwAuthenticate);
       const body: Record<string, unknown> = {
         error:
           result.denial.code === 'scope_insufficient'
@@ -125,7 +148,7 @@ export async function mountMCP(
     for (const toolId of extractToolIdsFromBody(req.body)) {
       const toolResult = await runtime.authorizePrincipal(result.principal, toolId);
       if (!toolResult.allowed) {
-        res.setHeader('WWW-Authenticate', toolResult.denial.wwwAuthenticate);
+        safeSetWwwAuthenticate(res, toolResult.denial.wwwAuthenticate);
         const body: Record<string, unknown> = {
           error:
             toolResult.denial.code === 'scope_insufficient'

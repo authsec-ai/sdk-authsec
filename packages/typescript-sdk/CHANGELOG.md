@@ -1,5 +1,26 @@
 # Changelog — @authsec/sdk (TypeScript)
 
+## 4.4.2 — Hotfixes: header sanitizer + lower cache TTLs (Phase H-1 / H-2)
+
+**1. WWW-Authenticate header sanitizer (H-1).** Node ``TypeError [ERR_INVALID_CHAR]:
+Invalid character in header content ["WWW-Authenticate"]`` crashed the response
+handler whenever an upstream error body (typically Hydra) leaked CR / LF / control
+chars into ``error_description``. The denial we tried to send surfaced as a 500
+with an HTML body, defeating the 401-with-PRM-discovery flow.
+
+  Fix: ``buildWwwAuthenticate`` now sanitizes every attribute (realm, error,
+  error_description, scope, resource_metadata) before emitting it — control chars
+  (0x00–0x1F + 0x7F) become spaces, backslash + double-quote escape per RFC 7230,
+  values truncate to 200 chars.
+
+**2. Lower scope-matrix cache TTLs (H-2).** Default ``scopeMatrixCacheTtlSeconds``
+drops from 300 s to 30 s; stale-with-error window drops from 1800 s to 120 s;
+retry backoff from 30 s to 10 s. Closes the "admin revokes a permission, user
+keeps calling tools for 5 minutes" gap. Customers who need the old behavior for
+performance can override via ``Config.scopeMatrixCacheTtlSeconds``.
+
+No API changes in either fix. Drop-in upgrade.
+
 ## 4.4.0 — Dynamic PRM from AuthSec (admin-driven scopes)
 
 Backend prerequisite: AuthSec ``/sdk-policy`` now emits ``scopes_supported`` (live as of this release).

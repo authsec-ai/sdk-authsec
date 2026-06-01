@@ -135,15 +135,41 @@ export function buildWwwAuthenticate(
     }
   }
 
-  const parts: string[] = [`Bearer realm="${realm}"`];
-  if (metadataUrl) parts.push(`resource_metadata="${metadataUrl}"`);
-  if (error) parts.push(`error="${error}"`);
-  if (description) {
-    const safe = description.replace(/"/g, '\\"');
-    parts.push(`error_description="${safe}"`);
-  }
-  if (scope) parts.push(`scope="${scope}"`);
+  const parts: string[] = [`Bearer realm="${sanitizeHeaderValue(realm)}"`];
+  if (metadataUrl) parts.push(`resource_metadata="${sanitizeHeaderValue(metadataUrl)}"`);
+  if (error) parts.push(`error="${sanitizeHeaderValue(error)}"`);
+  if (description) parts.push(`error_description="${sanitizeHeaderValue(description)}"`);
+  if (scope) parts.push(`scope="${sanitizeHeaderValue(scope)}"`);
   return parts.join(', ');
+}
+
+/**
+ * Sanitize a string for inclusion in an HTTP header field-value (RFC 7230 §3.2.6).
+ *
+ * Field-value MUST NOT contain CR, LF, or NUL — Node's http module enforces this
+ * and throws TypeError [ERR_INVALID_CHAR] when violated. Hydra (and most upstream
+ * auth servers) leak control chars AND non-ASCII bytes (localized error strings,
+ * smart quotes, RTL marks, U+00A0 non-breaking space, U+200B zero-width space)
+ * into error bodies that then end up in our ``error_description``. The previous
+ * regex stripped only ``\x00-\x1F`` + ``\x7F`` and let everything ≥ 0x80
+ * through — Node rejects those too. The symptom in the wild was a Node
+ * ``TypeError: Invalid character in header content`` surfacing as a 500 with
+ * HTML body, instead of a clean 401 JSON.
+ *
+ * Strategy (printable-ASCII-only):
+ *  - Replace anything outside 0x20–0x7E with a single space
+ *  - Convert embedded double-quotes to apostrophes (cheaper + safer than
+ *    backslash-escaping inside a quoted-string — Node's validator has been
+ *    known to reject backslash sequences in some versions)
+ *  - Strip embedded backslashes for the same reason
+ *  - Hard-truncate to 200 chars so the header stays under the 8 KiB server limit
+ *    even with several attribute pairs combined
+ */
+function sanitizeHeaderValue(s: string): string {
+  return s
+    .replace(/[^\x20-\x7e]/g, ' ')
+    .replace(/[\\"]/g, "'")
+    .slice(0, 200);
 }
 
 /**

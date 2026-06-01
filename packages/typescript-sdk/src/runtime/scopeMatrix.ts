@@ -26,9 +26,14 @@ import {
   type ToolScopeMap,
 } from './policy.js';
 
-const DEFAULT_SCOPE_MATRIX_TTL_SECONDS = 300;
-const DEFAULT_MAX_STALE_AGE_SECONDS = 30 * 60;
-const DEFAULT_RETRY_BACKOFF_SECONDS = 30;
+// Tightened defaults in 4.4.2 to close the "revoke a permission, user still has access
+// for 5 min" gap. With these values, admin RBAC changes propagate to MCP servers within
+// ≤30 s in the common case; stale-with-error window is capped at 2 min so a misbehaving
+// AS doesn't leave a server running on outdated policy for half an hour. Customers who
+// want the old behavior for performance can override via Config.scopeMatrixCacheTtlSeconds.
+const DEFAULT_SCOPE_MATRIX_TTL_SECONDS = 30;
+const DEFAULT_MAX_STALE_AGE_SECONDS = 120;
+const DEFAULT_RETRY_BACKOFF_SECONDS = 10;
 
 /**
  * Returned when the backend signals ``policy_complete=false``. Callers must
