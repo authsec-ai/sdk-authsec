@@ -31,15 +31,15 @@ from fastapi.responses import JSONResponse
 from authsec_sdk.runtime import Config, PolicyMode, ValidationMode, mount_mcp
 
 
-# ─── Replace these with the values from your AuthSec admin UI ─────────
-ISSUER = "https://dev.api.authsec.dev"
-AUTHORIZATION_SERVER = "https://dev.api.authsec.dev"
-JWKS_URL = "https://dev.api.authsec.dev/oauth/jwks"
-INTROSPECTION_URL = "https://dev.api.authsec.dev/oauth/introspect"
-INTROSPECTION_CLIENT_ID = "525da3b4-4206-4070-ad68-90cc3a6de43b"
-RESOURCE_SERVER_ID = "525da3b4-4206-4070-ad68-90cc3a6de43b"
-RESOURCE_URI = "https://20-106-226-245.sslip.io/mcp"
-RESOURCE_NAME = "GitHub MCP Server"
+# ─── Replace with env vars or values from your AuthSec admin UI ──────
+ISSUER = os.environ.get("AUTHSEC_ISSUER", "https://your-authsec-api.example.com")
+AUTHORIZATION_SERVER = ISSUER
+JWKS_URL = ISSUER + "/oauth/jwks"
+INTROSPECTION_URL = ISSUER + "/oauth/introspect"
+INTROSPECTION_CLIENT_ID = os.environ.get("AUTHSEC_INTROSPECTION_CLIENT_ID", "your-client-id")
+RESOURCE_SERVER_ID = os.environ.get("AUTHSEC_RESOURCE_SERVER_ID", "your-resource-server-id")
+RESOURCE_URI = os.environ.get("AUTHSEC_RESOURCE_URI", "https://your-mcp-server.example.com/mcp")
+RESOURCE_NAME = os.environ.get("AUTHSEC_RESOURCE_NAME", "My MCP Server")
 
 
 # ─── Your existing MCP handler ────────────────────────────────────────

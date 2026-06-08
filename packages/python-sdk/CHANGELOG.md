@@ -1,5 +1,22 @@
 # Changelog — authsec-sdk (Python)
 
+## 4.4.3 — Tighten header sanitizer for non-ASCII bytes
+
+**Follow-up to 4.4.2 sanitizer.** The H-1 fix stripped CR / LF / NUL but
+allowed everything ≥ 0x80 through. ASGI/uvicorn also rejects non-ASCII bytes
+in header values, so localized Hydra error strings, smart quotes, U+00A0
+non-breaking space, U+200B zero-width space, and emoji slipped past the
+guard and crashed the 401 the same way control chars did. Reproduction in
+the wild: revoking a role on the AuthSec Assignments page caused the next
+MCP client request to receive an HTML error page instead of a clean 401.
+
+**Fix:** ``_sanitize_header_value`` now keeps only printable ASCII
+(0x20–0x7E), converts embedded ``\\`` and ``"`` to apostrophes (some HTTP
+stacks reject backslash sequences in header values), and truncates to 200
+chars. Matches TS sdk 4.4.3.
+
+No API changes. Drop-in upgrade.
+
 ## 4.4.2 — Hotfixes: header sanitizer + lower cache TTLs (Phase H-1 / H-2)
 
 **1. WWW-Authenticate header sanitizer (H-1).** ASGI/WSGI servers reject HTTP

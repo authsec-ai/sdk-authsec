@@ -7,9 +7,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AuthSecConfig } from './types.js';
 
-const DEFAULT_AUTHSEC_API_ORIGIN = process.env.AUTHSEC_API_ORIGIN || 'http://localhost:7468';
-const DEFAULT_AUTH_SERVICE_URL = `${DEFAULT_AUTHSEC_API_ORIGIN}/authsec/sdkmgr/mcp-auth`;
-const DEFAULT_SERVICES_BASE_URL = `${DEFAULT_AUTHSEC_API_ORIGIN}/authsec/sdkmgr/services`;
+const DEFAULT_AUTHSEC_API_ORIGIN = process.env.AUTHSEC_API_ORIGIN || process.env.AUTHSEC_ISSUER || '';
+const DEFAULT_AUTH_SERVICE_URL = DEFAULT_AUTHSEC_API_ORIGIN ? `${DEFAULT_AUTHSEC_API_ORIGIN}/authsec/sdkmgr/mcp-auth` : '';
+const DEFAULT_SERVICES_BASE_URL = DEFAULT_AUTHSEC_API_ORIGIN ? `${DEFAULT_AUTHSEC_API_ORIGIN}/authsec/sdkmgr/services` : '';
 export const DEFAULT_CIBA_BASE_URL = DEFAULT_AUTHSEC_API_ORIGIN;
 
 const _config: AuthSecConfig = {

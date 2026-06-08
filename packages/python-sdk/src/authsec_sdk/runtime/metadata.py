@@ -107,18 +107,23 @@ def _sanitize_header_value(s: str) -> str:
 
     Field-value MUST NOT contain CR / LF / NUL. ASGI servers + most HTTP
     libraries enforce this and raise on violation. Hydra and other upstream
-    auth servers leak control chars into error bodies that end up in our
-    ``error_description``; without this guard, the 401 we're trying to send
-    crashes instead of being delivered as a clean denial.
+    auth servers leak both control chars AND non-ASCII bytes (smart quotes,
+    RTL marks, U+00A0 non-breaking space, U+200B zero-width space, emojis
+    from localized error strings) into error bodies that end up in our
+    ``error_description``. The previous regex stripped only control chars
+    and let everything ≥ 0x80 through — Starlette/Uvicorn reject those too
+    and the 401 we're trying to send crashes instead of being delivered.
 
-    Strategy:
-      - Replace every control char (0x00–0x1F + 0x7F) with a single space
-      - Escape backslash (must come before quote so we don't double-escape)
-      - Escape double-quote (RFC 7230 quoted-string)
+    Strategy (printable-ASCII-only, matches TS sdk 4.4.3):
+      - Replace anything outside 0x20–0x7E with a single space
+      - Convert embedded double-quotes to apostrophes (cheaper + safer than
+        backslash-escaping inside a quoted-string — some HTTP stacks reject
+        backslash sequences in header values)
+      - Strip embedded backslashes for the same reason
       - Hard-truncate to 200 chars so the header stays under server limits
     """
-    out = "".join(" " if ord(c) < 0x20 or ord(c) == 0x7F else c for c in s)
-    out = out.replace("\\", "\\\\").replace('"', '\\"')
+    out = "".join(c if 0x20 <= ord(c) <= 0x7E else " " for c in s)
+    out = out.replace("\\", "'").replace('"', "'")
     return out[:200]
 
 

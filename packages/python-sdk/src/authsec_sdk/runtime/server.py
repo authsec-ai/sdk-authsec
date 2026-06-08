@@ -7,15 +7,15 @@ Typical usage with FastAPI / Starlette::
     from authsec_sdk.runtime import Config, PolicyMode, ValidationMode, mount_mcp
 
     cfg = Config(
-        issuer="https://dev.api.authsec.dev",
-        authorization_server="https://dev.api.authsec.dev",
-        jwks_url="https://dev.api.authsec.dev/oauth/jwks",
-        introspection_url="https://dev.api.authsec.dev/oauth/introspect",
-        introspection_client_id="...",
+        issuer=os.environ["AUTHSEC_ISSUER"],               # e.g. https://stage.api.authsec.dev
+        authorization_server=os.environ["AUTHSEC_ISSUER"],
+        jwks_url=os.environ["AUTHSEC_ISSUER"] + "/oauth/jwks",
+        introspection_url=os.environ["AUTHSEC_ISSUER"] + "/oauth/introspect",
+        introspection_client_id=os.environ["AUTHSEC_INTROSPECTION_CLIENT_ID"],
         introspection_client_secret=os.environ["AUTHSEC_INTROSPECTION_CLIENT_SECRET"],
-        resource_server_id="...",
-        resource_uri="https://20-106-226-245.sslip.io/mcp",
-        resource_name="GitHub MCP Server",
+        resource_server_id=os.environ["AUTHSEC_RESOURCE_SERVER_ID"],
+        resource_uri=os.environ["AUTHSEC_RESOURCE_URI"],
+        resource_name=os.environ.get("AUTHSEC_RESOURCE_NAME", "My MCP Server"),
         policy_mode=PolicyMode.REMOTE_REQUIRED,
         validation_mode=ValidationMode.JWT_AND_INTROSPECT,
         publish_manifest=True,

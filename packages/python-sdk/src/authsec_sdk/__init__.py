@@ -90,7 +90,7 @@ try:
 except ImportError:
     WorkloadSVID = None
 
-__version__ = "4.3.0"
+__version__ = "4.4.3"
 __all__ = [
     # ── Runtime SDK (modern) ────────────────────────────────────
     "Config",

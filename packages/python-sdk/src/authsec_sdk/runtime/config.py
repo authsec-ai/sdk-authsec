@@ -79,15 +79,15 @@ class Config:
     Example::
 
         cfg = Config(
-            issuer="https://dev.api.authsec.dev",
-            authorization_server="https://dev.api.authsec.dev",
-            jwks_url="https://dev.api.authsec.dev/oauth/jwks",
-            introspection_url="https://dev.api.authsec.dev/oauth/introspect",
-            introspection_client_id="525da3b4-4206-4070-ad68-90cc3a6de43b",
+            issuer=os.environ.get("AUTHSEC_ISSUER", "https://your-authsec-api.example.com"),
+            authorization_server=os.environ.get("AUTHSEC_AUTHORIZATION_SERVER", "https://your-authsec-api.example.com"),
+            jwks_url=os.environ.get("AUTHSEC_JWKS_URL", "https://your-authsec-api.example.com/oauth/jwks"),
+            introspection_url=os.environ.get("AUTHSEC_INTROSPECTION_URL", "https://your-authsec-api.example.com/oauth/introspect"),
+            introspection_client_id=os.environ.get("AUTHSEC_INTROSPECTION_CLIENT_ID", ""),
             introspection_client_secret=os.environ["AUTHSEC_INTROSPECTION_CLIENT_SECRET"],
-            resource_server_id="525da3b4-4206-4070-ad68-90cc3a6de43b",
-            resource_uri="https://20-106-226-245.sslip.io/mcp",
-            resource_name="GitHub MCP Server",
+            resource_server_id=os.environ.get("AUTHSEC_RESOURCE_SERVER_ID", ""),
+            resource_uri=os.environ.get("AUTHSEC_RESOURCE_URI", "https://your-mcp-server.example.com/mcp"),
+            resource_name=os.environ.get("AUTHSEC_RESOURCE_NAME", "My MCP Server"),
             policy_mode=PolicyMode.REMOTE_REQUIRED,
             validation_mode=ValidationMode.JWT_AND_INTROSPECT,
             publish_manifest=True,

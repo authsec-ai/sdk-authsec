@@ -91,15 +91,22 @@ class MCPServer {
 
   private setupRoutes(): void {
     this.app.get('/', (_req, res) => {
-      const config = getInternalConfig();
-      res.json({
+      const info: Record<string, string> = {
         name: this.appName,
         version: '1.0.0',
         protocol: 'mcp-with-oauth',
         status: 'running',
-        auth_service: config.authServiceUrl,
-        services_url: config.servicesBaseUrl,
-      });
+      };
+      // Only expose auth URLs if they're real (not empty/localhost defaults).
+      // MCP clients should use /.well-known/oauth-protected-resource for discovery.
+      const config = getInternalConfig();
+      if (config.authServiceUrl && !config.authServiceUrl.includes('localhost')) {
+        info.auth_service = config.authServiceUrl;
+      }
+      if (config.servicesBaseUrl && !config.servicesBaseUrl.includes('localhost')) {
+        info.services_url = config.servicesBaseUrl;
+      }
+      res.json(info);
     });
 
     this.app.post('/', async (req, res) => {
