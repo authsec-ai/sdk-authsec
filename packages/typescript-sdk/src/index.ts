@@ -54,6 +54,26 @@ export { QuickStartSVID } from './spiffe/quick-start-svid.js';
 export { WorkloadAPIClient } from './spiffe/workload-api-client.js';
 export { WorkloadSVID } from './spiffe/workload-svid.js';
 
+// Cross-App Access (XAA / ID-JAG)
+export {
+  requestIdJag,
+  exchangeForAccessToken,
+  crossAppAccess,
+  OAuthError,
+  GRANT_TYPE_TOKEN_EXCHANGE,
+  GRANT_TYPE_JWT_BEARER,
+  TOKEN_TYPE_ID_JAG,
+  TOKEN_TYPE_ID_TOKEN,
+  TOKEN_TYPE_REFRESH_TOKEN,
+} from './xaa.js';
+export type {
+  RequestIdJagInput,
+  IdJagResponse,
+  ExchangeForAccessTokenInput,
+  AccessTokenResponse,
+  CrossAppAccessInput,
+} from './xaa.js';
+
 // Types
 export type {
   ToolHandler,
@@ -68,7 +88,7 @@ export type {
 } from './types.js';
 export { SimpleSession } from './types.js';
 
-export const VERSION = '4.3.0';
+export const VERSION = '4.5.0';
 
 // Runtime API (Go/Python parity)
 export * from './runtime/index.js';
