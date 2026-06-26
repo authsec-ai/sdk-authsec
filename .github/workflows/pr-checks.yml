@@ -1,0 +1,84 @@
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, authsec-staging, authsec-dev]
+
+jobs:
+  go-sdk:
+    name: Go SDK build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'packages/go-sdk/go.mod'
+          cache: true
+
+      - name: go build
+        working-directory: packages/go-sdk
+        run: go build ./...
+
+      - name: go vet
+        working-directory: packages/go-sdk
+        run: go vet ./...
+
+  typescript-sdk:
+    name: TypeScript SDK build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/typescript-sdk/package-lock.json
+
+      - name: Install dependencies
+        working-directory: packages/typescript-sdk
+        run: npm ci
+
+      - name: Build
+        working-directory: packages/typescript-sdk
+        run: npm run build
+
+  python-sdk:
+    name: Python SDK syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        working-directory: packages/python-sdk
+        run: pip install -e . --quiet
+
+      - name: Syntax check
+        working-directory: packages/python-sdk
+        run: python -m py_compile $(find src -name '*.py')
+
+  merge-gate:
+    name: Merge Gate
+    runs-on: ubuntu-latest
+    needs: [go-sdk, typescript-sdk, python-sdk]
+    if: always()
+    steps:
+      - name: All SDK builds must pass
+        if: >
+          needs.go-sdk.result != 'success' ||
+          needs.typescript-sdk.result != 'success' ||
+          needs.python-sdk.result != 'success'
+        run: |
+          echo "One or more SDK builds failed — merge blocked"
+          exit 1
+      - name: All checks passed
+        run: echo "All required checks passed"
