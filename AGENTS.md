@@ -19,3 +19,10 @@ Workspace context: root [`../AGENTS.md`](../AGENTS.md). `CLAUDE.md` points here.
 - Keep the public API tiny and identical in spirit across the 3 languages (the "3 lines" promise). Don't add a capability to one SDK without noting parity in the others.
 - Don't add tests unless asked. `git push` is the only approval gate.
 - Runnable end-to-end examples per flow are a **deferred** docs phase — `examples/` may be sparse today.
+
+## Deep docs index
+
+| I'm about to… | Read this first |
+|---|---|
+| Add a feature / understand SDK conventions and parity rule | [`docs/sdk-conventions.md`](docs/sdk-conventions.md) |
+| Work on a specific flow (M2M, XAA, SPIFFE, DCR) | The flow docs in `../authsec/docs/flows/` (linked in sdk-conventions.md) |
