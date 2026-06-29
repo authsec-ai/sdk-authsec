@@ -71,6 +71,7 @@ from .runtime import (
     Runtime,
     mount_mcp,
     principal_from_context,
+    wrap_asgi_handler,
     AuthorizeResult,
     AuthorizeDenial,
     DenialCode,
@@ -114,6 +115,15 @@ try:
 except ImportError:
     WorkloadSVID = None
 
+# SPIFFE/SPIRE workload identity — JWT-SVID → Bearer token exchange
+from .spiffe_identity import (
+    SpiffeConfig,
+    SpiffeWorkloadIdentity,
+    SpiffeIdentityError,
+    SpiffeSvidFetchError,
+    SpiffeTokenExchangeError,
+)
+
 # Agent Identity SDK — client-side flow selection + M2M / XAA token acquisition
 from .agent_identity import (
     AgentIdentity,
@@ -129,6 +139,8 @@ from .agent_identity import (
     # TypeScript parity: standalone polling helper
     poll_until_approved,
     PollOptions,
+    # Browser PKCE login helper
+    browser_login,
 )
 
 __version__ = "4.6.0"
@@ -172,6 +184,7 @@ __all__ = [
     "Runtime",
     "mount_mcp",
     "principal_from_context",
+    "wrap_asgi_handler",
     "AuthorizeResult",
     "AuthorizeDenial",
     "DenialCode",
@@ -210,6 +223,12 @@ __all__ = [
     "QuickStartSVID",
     "WorkloadAPIClient",
     "WorkloadSVID",
+    # ── SPIFFE/SPIRE workload identity ────────────────────────────────────
+    "SpiffeConfig",
+    "SpiffeWorkloadIdentity",
+    "SpiffeIdentityError",
+    "SpiffeSvidFetchError",
+    "SpiffeTokenExchangeError",
     # ── Agent Identity (M2M / XAA token acquisition) ──────────────────────
     "AgentIdentity",
     "AuthSecIdentityError",
@@ -224,4 +243,6 @@ __all__ = [
     # TypeScript parity: standalone polling helper
     "poll_until_approved",
     "PollOptions",
+    # Browser PKCE login helper
+    "browser_login",
 ]

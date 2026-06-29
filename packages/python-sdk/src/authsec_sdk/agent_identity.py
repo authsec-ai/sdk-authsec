@@ -44,6 +44,8 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 
+from .runtime.metadata import build_resource_metadata_url
+
 # ── Error taxonomy (§9) ────────────────────────────────────────────────────────
 
 __all__ = [
@@ -60,6 +62,8 @@ __all__ = [
     # TypeScript parity: standalone polling helper
     "poll_until_approved",
     "PollOptions",
+    # Browser PKCE login helper
+    "browser_login",
 ]
 
 
@@ -142,7 +146,7 @@ class WorkloadNotAttestedError(AuthSecIdentityError):
 
 # ── Type aliases ───────────────────────────────────────────────────────────────
 
-PreferredMode = Literal["auto", "direct-only", "xaa-allowed"]
+PreferredMode = Literal["auto", "direct-only", "xaa-allowed", "xaa-only"]
 
 # ── Main class ────────────────────────────────────────────────────────────────
 
@@ -276,6 +280,20 @@ class AgentIdentity:
             return await self._direct(
                 resource, token_ep,
                 requested_scopes=requested_scopes, extra=extra,
+            )
+
+        # xaa-only: force XAA/ID-JAG regardless of bootstrap recommendation.
+        if mode == "xaa-only":
+            if not user_session:
+                raise AuthSecIdentityError(
+                    "xaa_requires_user_session",
+                    "xaa-only mode requires a user_session with subject_token.",
+                )
+            return await self._xaa(
+                resource, as_meta, token_ep,
+                user_session=user_session,
+                requested_scopes=requested_scopes,
+                extra=extra,
             )
 
         # No XAA support on AS, or no IdP configured, or no user session → direct.
@@ -570,8 +588,7 @@ class AgentIdentity:
     # ── PRM discovery (RFC 9728) ───────────────────────────────────────────────
 
     async def _discover_prm(self, resource: str) -> Dict[str, Any]:
-        parsed = urlparse(resource)
-        prm_url = f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource"
+        prm_url = build_resource_metadata_url(resource)
 
         resp = await self._session.get(prm_url, headers={"Accept": "application/json"})
         if not resp.is_success:
@@ -770,3 +787,129 @@ async def poll_until_approved(
             raise
         except AuthSecIdentityError:
             raise
+
+
+# ── Browser PKCE login helper ─────────────────────────────────────────────────
+
+async def browser_login(
+    issuer: str,
+    client_id: str,
+    *,
+    resource: Optional[str] = None,
+    scopes: Optional[List[str]] = None,
+    port: int = 8126,
+) -> str:
+    """Open a browser PKCE login and return the ``id_token``.
+
+    Handles everything internally — PKCE pair generation, one-shot local
+    callback server, browser launch, and authorization-code exchange.
+    The caller gets back a plain ``id_token`` string, ready to pass as
+    ``user_session={"subject_token": id_token}`` to
+    :meth:`AgentIdentity.access_for`.
+
+    Usage::
+
+        id_token = await browser_login(
+            issuer    = os.environ["AUTHSEC_ISSUER"],
+            client_id = os.environ["IDP_CLIENT_ID"],
+        )
+
+    Parameters
+    ----------
+    issuer:
+        OIDC issuer base URL (e.g. ``https://mcpauthz.com``).
+    client_id:
+        Public (browser) OAuth client_id — no secret required.
+    scopes:
+        Scopes to request. Defaults to
+        ``["openid", "email", "profile", "mcp:read", "mcp:tools:read"]``.
+    port:
+        Local port for the redirect callback. Default: ``8126``.
+
+    Returns
+    -------
+    str
+        The ``id_token`` from the OIDC token response.
+
+    Raises
+    ------
+    RuntimeError
+        If the browser login fails or no ``id_token`` is returned.
+    """
+    import base64
+    import hashlib
+    import secrets
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+    from urllib.parse import parse_qs, urlencode, urlparse as _urlparse
+
+    redirect_uri = f"http://localhost:{port}/callback"
+    scope = " ".join(scopes or ["openid", "email", "profile"])
+
+    # Discover OIDC endpoints
+    async with httpx.AsyncClient() as _client:
+        meta = (await _client.get(
+            f"{issuer.rstrip('/')}/.well-known/openid-configuration"
+        )).json()
+
+    # Generate PKCE pair
+    verifier  = secrets.token_urlsafe(48)
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+
+    auth_params: Dict[str, str] = {
+        "response_type": "code", "client_id": client_id,
+        "redirect_uri": redirect_uri, "scope": scope,
+        "state": secrets.token_urlsafe(16), "nonce": secrets.token_urlsafe(16),
+        "code_challenge": challenge, "code_challenge_method": "S256",
+    }
+    if resource:
+        auth_params["resource"] = resource
+    auth_url = meta["authorization_endpoint"] + "?" + urlencode(auth_params)
+
+    # One-shot callback server — shuts down after receiving the first code
+    code_queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            code = parse_qs(_urlparse(self.path).query).get("code", [""])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<h2>Login complete &#8212; you can close this tab.</h2>")
+            loop.call_soon_threadsafe(code_queue.put_nowait, code)
+
+        def log_message(self, *_):
+            pass  # silence request logs
+
+    server = HTTPServer(("localhost", port), _Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+
+    webbrowser.open(auth_url)
+
+    code = await code_queue.get()
+    server.shutdown()
+
+    if not code:
+        raise RuntimeError("browser_login: no auth code received")
+
+    # Exchange code → tokens
+    token_body: Dict[str, str] = {
+        "grant_type": "authorization_code", "code": code,
+        "redirect_uri": redirect_uri, "client_id": client_id,
+        "code_verifier": verifier,
+    }
+    if resource:
+        token_body["resource"] = resource
+    async with httpx.AsyncClient() as _client:
+        tokens = (await _client.post(meta["token_endpoint"], data=token_body)).json()
+
+    if "id_token" not in tokens:
+        raise RuntimeError(f"browser_login: token exchange failed — {tokens}")
+
+    return tokens["id_token"]
