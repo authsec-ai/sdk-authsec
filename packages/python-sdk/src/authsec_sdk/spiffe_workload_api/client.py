@@ -157,10 +157,6 @@ class WorkloadAPIClient:
                     metadata.append((f'x-docker-label-{label_name}', value))
                     self.logger.debug(f"Sending Docker label {label_name}: {value}")
 
-            # DEBUG: Print metadata being sent
-            print(f"[SDK DEBUG] Metadata being sent to agent: {metadata}", flush=True)
-            print(f"[SDK DEBUG] Metadata tuple: {tuple(metadata)}", flush=True)
-
             # Call FetchX509SVID - get first response from stream
             # Convert metadata list to tuple for gRPC
             stream = self.stub.FetchX509SVID(request, metadata=tuple(metadata))
@@ -260,10 +256,6 @@ class WorkloadAPIClient:
                 if key.startswith('DOCKER_LABEL_'):
                     label_name = key[13:].lower()  # Remove 'DOCKER_LABEL_' prefix
                     metadata.append((f'x-docker-label-{label_name}', value))
-
-            # DEBUG: Print metadata being sent
-            print(f"[SDK DEBUG STREAM] Metadata being sent to agent: {metadata}", flush=True)
-            print(f"[SDK DEBUG STREAM] Metadata tuple: {tuple(metadata)}", flush=True)
 
             # Open streaming RPC - Convert metadata list to tuple for gRPC
             stream = self.stub.FetchX509SVID(request, metadata=tuple(metadata))

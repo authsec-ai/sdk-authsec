@@ -37,11 +37,15 @@ from .runtime import (
     from_env,
     # principal + policy
     Principal,
+    LookupResult,
+    ToolPolicyOutcome,
     ToolPolicyResult,
     ToolScopeMap,
     lookup_tool,
     required_scopes,
     has_any_required,
+    tool_scope_map_from_record,
+    toolScopeMapFromRecord,
     # validator
     HybridValidator,
     new_validator,
@@ -56,16 +60,25 @@ from .runtime import (
     publish_manifest,
     publish_manifest_safe,
     # metadata
+    PROTECTED_RESOURCE_PREFIX,
     build_metadata_payload,
     build_resource_metadata_path,
     build_resource_metadata_url,
     build_www_authenticate,
     is_metadata_request,
     metadata_json_response,
-    # runtime
+    # runtime — new TypeScript-parity APIs
     Runtime,
     mount_mcp,
     principal_from_context,
+    AuthorizeResult,
+    AuthorizeDenial,
+    DenialCode,
+    extract_tool_id_from_body,
+    extract_tool_ids_from_body,
+    extractToolIdFromBody,
+    extractToolIdsFromBody,
+    # runtime — legacy exception-based API (kept for back-compat)
     InsufficientScopeError,
     PolicyUnavailableError,
 )
@@ -113,16 +126,25 @@ from .agent_identity import (
     ResourceNotRegisteredError,
     CredentialInvalidError,
     WorkloadNotAttestedError,
+    # TypeScript parity: standalone polling helper
+    poll_until_approved,
+    PollOptions,
 )
 
-__version__ = "4.4.3"
+__version__ = "4.6.0"
 __all__ = [
-    # ── Runtime SDK (modern) ────────────────────────────────────
+    # ── Runtime SDK (modern) — TypeScript-parity additions ────────────────
     "Config",
     "PolicyMode",
     "ValidationMode",
     "from_env",
     "Principal",
+    # Policy — new (TypeScript parity)
+    "LookupResult",
+    "ToolPolicyOutcome",
+    "tool_scope_map_from_record",
+    "toolScopeMapFromRecord",
+    # Policy — legacy (kept for back-compat)
     "ToolPolicyResult",
     "ToolScopeMap",
     "lookup_tool",
@@ -138,18 +160,29 @@ __all__ = [
     "ManifestTool",
     "publish_manifest",
     "publish_manifest_safe",
+    # Metadata — new (TypeScript parity)
+    "PROTECTED_RESOURCE_PREFIX",
     "build_metadata_payload",
     "build_resource_metadata_path",
     "build_resource_metadata_url",
     "build_www_authenticate",
     "is_metadata_request",
     "metadata_json_response",
+    # Runtime — new (TypeScript parity)
     "Runtime",
     "mount_mcp",
     "principal_from_context",
+    "AuthorizeResult",
+    "AuthorizeDenial",
+    "DenialCode",
+    "extract_tool_id_from_body",
+    "extract_tool_ids_from_body",
+    "extractToolIdFromBody",
+    "extractToolIdsFromBody",
+    # Runtime — legacy exceptions (back-compat)
     "InsufficientScopeError",
     "PolicyUnavailableError",
-    # ── Legacy MCP Auth & Services ──────────────────────────────
+    # ── Legacy MCP Auth & Services ────────────────────────────────────────
     "protected_by_AuthSec",
     "run_mcp_server_with_oauth",
     "mcp_tool",
@@ -161,14 +194,14 @@ __all__ = [
     "load_config",
     "test_auth_service",
     "test_services",
-    # ── Client-side error helpers (agent side) ─────────────────
+    # ── Client-side error helpers (agent side) ────────────────────────────
     "AuthSecAccessError",
     "ClientInsufficientScopeError",
     "TokenRevokedError",
     "ClientRegistrationRevokedError",
     "AuthRequiredError",
     "parse_mcp_error",
-    # ── CIBA / Delegation / SPIFFE ─────────────────────────────
+    # ── CIBA / Delegation / SPIFFE ────────────────────────────────────────
     "CIBAClient",
     "DelegationClient",
     "DelegationError",
@@ -177,7 +210,7 @@ __all__ = [
     "QuickStartSVID",
     "WorkloadAPIClient",
     "WorkloadSVID",
-    # ── Agent Identity (M2M / XAA token acquisition) ───────────────────────
+    # ── Agent Identity (M2M / XAA token acquisition) ──────────────────────
     "AgentIdentity",
     "AuthSecIdentityError",
     "PendingApprovalError",
@@ -188,4 +221,7 @@ __all__ = [
     "ResourceNotRegisteredError",
     "CredentialInvalidError",
     "WorkloadNotAttestedError",
+    # TypeScript parity: standalone polling helper
+    "poll_until_approved",
+    "PollOptions",
 ]

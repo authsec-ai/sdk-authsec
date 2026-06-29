@@ -13,6 +13,13 @@ Example:
     # Access SVID data
     print(f"SPIFFE ID: {svid.spiffe_id}")
     print(f"Certificate: {svid.certificate}")
+
+    # Shutdown when done (TypeScript parity: QuickStartSVID.shutdown())
+    await QuickStartSVID.shutdown()
+
+TypeScript parity: mirrors ``spiffe/quick-start-svid.ts``.
+  - Added :meth:`shutdown` class method (stop renewal timer + disconnect).
+  - ``_renewal_task`` tracks the 30-minute background renewal timer.
 """
 
 import asyncio
@@ -35,6 +42,9 @@ class QuickStartSVID:
     _instance: Optional['QuickStartSVID'] = None
     _lock = asyncio.Lock()
 
+    # TypeScript parity: 30-minute renewal interval matching quick-start-svid.ts
+    _RENEWAL_INTERVAL_SECONDS: int = 30 * 60
+
     def __init__(
         self,
         socket_path: str = "tcp://127.0.0.1:4000",
@@ -55,6 +65,9 @@ class QuickStartSVID:
         self.cert_file_path: Optional[Path] = None
         self.key_file_path: Optional[Path] = None
         self.ca_file_path: Optional[Path] = None
+
+        # Background renewal task (TypeScript parity: renewal timer)
+        self._renewal_task: Optional[asyncio.Task] = None
 
     @classmethod
     async def initialize(
@@ -104,16 +117,15 @@ class QuickStartSVID:
                 self.private_key = self.client.private_key
                 self.trust_bundle = self.client.trust_bundle
 
-                self.logger.info(f"✓ SVID initialized: {self.spiffe_id}")
+                self.logger.info("SVID initialized: %s", self.spiffe_id)
 
                 # Write certificates to persistent files for mTLS
                 self._write_certs_to_files()
-                self.logger.info(f"✓ Certificates ready:")
-                self.logger.info(f"  Cert: {self.cert_file_path}")
-                self.logger.info(f"  Key: {self.key_file_path}")
-                self.logger.info(f"  CA: {self.ca_file_path}")
+                self.logger.info("Certificates written to %s", self.cert_dir)
 
-                self.logger.info("✓ Automatic certificate renewal enabled")
+                # Start 30-minute renewal timer (TypeScript parity)
+                self._renewal_task = asyncio.create_task(self._renewal_loop())
+                self.logger.info("Automatic certificate renewal enabled (30-min interval)")
             else:
                 raise RuntimeError("Failed to fetch SVID from agent")
         except Exception as e:
@@ -156,19 +168,42 @@ class QuickStartSVID:
                 temp_path.unlink()
             raise e
 
+    async def _renewal_loop(self) -> None:
+        """Background loop that re-fetches the SVID every 30 minutes.
+
+        TypeScript parity: mirrors the ``setInterval`` renewal in
+        ``spiffe/quick-start-svid.ts``.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._RENEWAL_INTERVAL_SECONDS)
+                try:
+                    success = await self.client.fetch_x509_svid_once()
+                    if success:
+                        self.spiffe_id = self.client.spiffe_id
+                        self.certificate = self.client.certificate
+                        self.private_key = self.client.private_key
+                        self.trust_bundle = self.client.trust_bundle
+                        self._write_certs_to_files()
+                        self.logger.info(
+                            "SVID renewed successfully for %s", self.spiffe_id
+                        )
+                    else:
+                        self.logger.warning("SVID renewal returned no SVIDs")
+                except Exception as e:
+                    self.logger.warning("SVID renewal failed: %s", e)
+        except asyncio.CancelledError:
+            self.logger.info("SVID renewal loop stopped")
+
     async def _on_cert_update(self, client: WorkloadAPIClient) -> None:
-        """Callback when certificates are renewed by the agent"""
-        # Update our cached data
+        """Callback when certificates are renewed by the streaming agent."""
         self.spiffe_id = client.spiffe_id
         self.certificate = client.certificate
         self.private_key = client.private_key
         self.trust_bundle = client.trust_bundle
 
-        # Automatically rewrite temp files for mTLS
         self._write_certs_to_files()
-
-        self.logger.info(f"✓ Certificates automatically renewed for {self.spiffe_id}")
-        self.logger.info("✅ mTLS certificate files updated successfully")
+        self.logger.info("mTLS certificate files updated for %s", self.spiffe_id)
 
     def create_ssl_context_for_server(self) -> ssl.SSLContext:
         """
@@ -219,21 +254,48 @@ class QuickStartSVID:
 
     @classmethod
     async def get(cls) -> 'QuickStartSVID':
-        """
-        Get the singleton instance (must call initialize() first).
-
-        Usage:
-            svid = await QuickStartSVID.get()
-
-        Returns:
-            QuickStartSVID instance
+        """Get the singleton instance (must call initialize() first).
 
         Raises:
-            RuntimeError: If initialize() not called yet
+            RuntimeError: If initialize() not called yet.
         """
         if cls._instance is None:
             raise RuntimeError("Call QuickStartSVID.initialize() first")
         return cls._instance
+
+    @classmethod
+    async def shutdown(cls) -> None:
+        """Stop the renewal timer and disconnect from the Workload API.
+
+        Clears the singleton so a fresh :meth:`initialize` can be called
+        afterwards (useful in tests and graceful-shutdown handlers).
+
+        TypeScript parity: mirrors ``QuickStartSVID.shutdown()`` in
+        ``spiffe/quick-start-svid.ts``.
+        """
+        async with cls._lock:
+            instance = cls._instance
+            cls._instance = None
+
+        if instance is None:
+            return
+
+        # Cancel the renewal task if running.
+        if instance._renewal_task is not None:
+            instance._renewal_task.cancel()
+            try:
+                await instance._renewal_task
+            except asyncio.CancelledError:
+                pass
+            instance._renewal_task = None
+
+        # Disconnect gRPC channel.
+        try:
+            await instance.client.disconnect()
+        except Exception as e:
+            instance.logger.warning("Error disconnecting Workload API client: %s", e)
+
+        instance.logger.info("QuickStartSVID shut down")
 
     def get_certificate_dict(self) -> dict:
         """

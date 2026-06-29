@@ -34,8 +34,11 @@ Usage (XAA cross-app, user-delegated)::
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import dataclasses
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlencode, urlparse
 
@@ -54,6 +57,9 @@ __all__ = [
     "ResourceNotRegisteredError",
     "CredentialInvalidError",
     "WorkloadNotAttestedError",
+    # TypeScript parity: standalone polling helper
+    "poll_until_approved",
+    "PollOptions",
 ]
 
 
@@ -662,3 +668,105 @@ class AgentIdentity:
         """Close the underlying HTTP session if this instance owns it."""
         if self._owns_session:
             await self._session.aclose()
+
+
+# ── Standalone polling helper (TypeScript parity) ─────────────────────────────
+
+@dataclass
+class PollOptions:
+    """Options for :func:`poll_until_approved`.
+
+    TypeScript parity: mirrors ``PollOptions`` in ``agent-identity.ts``.
+    """
+
+    interval_seconds: float = 3.0
+    """How often to poll the status URL."""
+
+    timeout_seconds: float = 300.0
+    """Maximum total time to wait before raising :class:`TimeoutError`."""
+
+
+async def poll_until_approved(
+    identity: "AgentIdentity",
+    resource: str,
+    pending_error: PendingApprovalError,
+    *,
+    opts: Optional[PollOptions] = None,
+    user_session: Optional[Dict[str, str]] = None,
+    requested_scopes: Optional[List[str]] = None,
+) -> str:
+    """Poll until access is approved and return the access token.
+
+    Repeatedly calls :meth:`AgentIdentity.access_for` until it succeeds
+    (access approved), raises :class:`ApprovalDeniedError` (admin declined),
+    or the timeout expires.
+
+    Usage::
+
+        try:
+            token = await identity.access_for(resource)
+        except PendingApprovalError as e:
+            token = await poll_until_approved(identity, resource, e)
+
+    Parameters
+    ----------
+    identity:
+        The :class:`AgentIdentity` instance to use for token acquisition.
+    resource:
+        The MCP server resource URI (same as passed to ``access_for``).
+    pending_error:
+        The :class:`PendingApprovalError` raised by ``access_for``.
+    opts:
+        Polling options (interval + timeout). Defaults to 3-second interval,
+        5-minute timeout.
+    user_session:
+        Optional user session dict for XAA flows.
+    requested_scopes:
+        Optional scopes to request.
+
+    Returns
+    -------
+    str
+        The access token once access is approved.
+
+    Raises
+    ------
+    ApprovalDeniedError
+        When an admin declines the access request.
+    TimeoutError
+        When ``opts.timeout_seconds`` elapses without approval.
+    AuthSecIdentityError
+        On any other terminal error from the identity service.
+
+    TypeScript parity: mirrors ``pollUntilApproved()`` in
+    ``agent-identity.ts``.
+    """
+    poll_opts = opts or PollOptions()
+    deadline = time.monotonic() + poll_opts.timeout_seconds
+    # Clear any cached (pending) token so the next access_for does a fresh request.
+    identity.clear_cache(resource)
+
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"poll_until_approved: timed out after {poll_opts.timeout_seconds}s "
+                f"waiting for approval of access to {resource} "
+                f"(request_id={pending_error.request_id})"
+            )
+
+        await asyncio.sleep(poll_opts.interval_seconds)
+
+        try:
+            token = await identity.access_for(
+                resource,
+                user_session=user_session,
+                requested_scopes=requested_scopes,
+            )
+            return token
+        except PendingApprovalError:
+            # Still pending — keep polling.
+            continue
+        except ApprovalDeniedError:
+            raise
+        except AuthSecIdentityError:
+            raise
