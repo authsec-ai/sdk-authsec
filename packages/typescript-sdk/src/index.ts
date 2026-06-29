@@ -46,6 +46,22 @@ export { testAuthService, testServices } from './http.js';
 // Service Access
 export { ServiceAccessSDK, ServiceAccessError } from './service-access.js';
 
+// Agent Identity — §10 flow selection + token acquisition
+export {
+  AgentIdentity,
+  AuthSecIdentityError,
+  PendingApprovalError,
+  ApprovalDeniedError,
+  ConnectionRevokedError,
+  TrustedIssuerMissingError,
+  SubjectMappingFailedError,
+  ResourceNotRegisteredError,
+  CredentialInvalidError,
+  WorkloadNotAttestedError,
+  pollUntilApproved,
+} from './agent-identity.js';
+export type { AgentIdentityConfig, AccessForOptions, PreferredMode, PollOptions } from './agent-identity.js';
+
 // CIBA Passwordless Auth
 export { CIBAClient } from './ciba.js';
 
@@ -68,7 +84,12 @@ export type {
 } from './types.js';
 export { SimpleSession } from './types.js';
 
-export const VERSION = '4.3.0';
+export const VERSION = '4.6.0';
 
 // Runtime API (Go/Python parity)
 export * from './runtime/index.js';
+
+// Client-side error helpers — agent-side typed exceptions + parseMcpError
+// for surfacing AuthSec 401/403 responses as actionable errors instead of
+// opaque ToolException strings.
+export * from './client/index.js';
