@@ -81,6 +81,17 @@ from .delegation_sdk import (
     DelegationTokenNotFound,
 )
 
+# Client-side error helpers (agent-side: surface AuthSec 401/403 as typed
+# Python exceptions instead of opaque ToolException strings).
+from .client import (
+    AuthRequiredError,
+    AuthSecAccessError,
+    ClientRegistrationRevokedError,
+    InsufficientScopeError as ClientInsufficientScopeError,
+    TokenRevokedError,
+    parse_mcp_error,
+)
+
 # Import standalone SPIFFE Workload API SDK
 from .spiffe_workload_api import QuickStartSVID, WorkloadAPIClient
 
@@ -89,6 +100,20 @@ try:
     from .spire_sdk import WorkloadSVID
 except ImportError:
     WorkloadSVID = None
+
+# Agent Identity SDK — client-side flow selection + M2M / XAA token acquisition
+from .agent_identity import (
+    AgentIdentity,
+    AuthSecIdentityError,
+    PendingApprovalError,
+    ApprovalDeniedError,
+    ConnectionRevokedError,
+    TrustedIssuerMissingError,
+    SubjectMappingFailedError,
+    ResourceNotRegisteredError,
+    CredentialInvalidError,
+    WorkloadNotAttestedError,
+)
 
 __version__ = "4.4.3"
 __all__ = [
@@ -136,6 +161,13 @@ __all__ = [
     "load_config",
     "test_auth_service",
     "test_services",
+    # ── Client-side error helpers (agent side) ─────────────────
+    "AuthSecAccessError",
+    "ClientInsufficientScopeError",
+    "TokenRevokedError",
+    "ClientRegistrationRevokedError",
+    "AuthRequiredError",
+    "parse_mcp_error",
     # ── CIBA / Delegation / SPIFFE ─────────────────────────────
     "CIBAClient",
     "DelegationClient",
@@ -145,4 +177,15 @@ __all__ = [
     "QuickStartSVID",
     "WorkloadAPIClient",
     "WorkloadSVID",
+    # ── Agent Identity (M2M / XAA token acquisition) ───────────────────────
+    "AgentIdentity",
+    "AuthSecIdentityError",
+    "PendingApprovalError",
+    "ApprovalDeniedError",
+    "ConnectionRevokedError",
+    "TrustedIssuerMissingError",
+    "SubjectMappingFailedError",
+    "ResourceNotRegisteredError",
+    "CredentialInvalidError",
+    "WorkloadNotAttestedError",
 ]

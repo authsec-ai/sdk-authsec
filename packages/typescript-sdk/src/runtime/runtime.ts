@@ -43,7 +43,14 @@ export interface AuthorizeDenial {
   wwwAuthenticate: string;
   /** Set when denial code is ``scope_insufficient`` so the caller can echo it. */
   requiredScopes?: string[];
+  /** Scopes the token actually carries. Lets the client SDK show
+   *  "you have [a,b], you need [c]" instead of just "you need [c]". */
+  grantedScopes?: string[];
   tool?: string;
+  /** Stable, parseable subreason for 401s — `token_revoked`,
+   *  `client_registration_revoked`, `token_expired`, `audience_mismatch`,
+   *  `no_token`, `invalid_token`. Empty for non-401 denials. */
+  reason?: string;
 }
 
 export type AuthorizeResult =
@@ -254,14 +261,18 @@ export class Runtime {
       return { allowed: true, principal };
     }
     if (result.outcome === 'absent') {
-      return this.denyScopeInsufficient(tool, ['<tool not in policy>']);
+      return this.denyScopeInsufficient(
+        tool,
+        [`<no scope mapping for tool '${tool}'>`],
+        principal.scopes,
+      );
     }
     // SCOPED
     const granted = new Set(principal.scopes);
     if (result.required_any.some((s) => granted.has(s))) {
       return { allowed: true, principal };
     }
-    return this.denyScopeInsufficient(tool, result.required_any);
+    return this.denyScopeInsufficient(tool, result.required_any, principal.scopes);
   }
 
   // ── Denial helpers ────────────────────────────────────────────────
@@ -277,6 +288,7 @@ export class Runtime {
           error: 'invalid_token',
           errorDescription: description,
         }),
+        reason: classifyAuthReason(description),
       },
     };
   }
@@ -296,24 +308,32 @@ export class Runtime {
     };
   }
 
-  private denyScopeInsufficient(tool: string, required: string[]): AuthorizeResult {
+  private denyScopeInsufficient(
+    tool: string,
+    required: string[],
+    granted: string[] = [],
+  ): AuthorizeResult {
     const scope = required.join(' ');
+    const description = formatScopeMessage(tool, required, granted);
     return {
       allowed: false,
       denial: {
         code: 'scope_insufficient',
-        description: `tool ${JSON.stringify(tool)} requires one of ${JSON.stringify(required)}`,
+        description,
         status: 403,
         wwwAuthenticate: buildWwwAuthenticate(this.cfg, {
           error: 'insufficient_scope',
-          errorDescription: `tool ${JSON.stringify(tool)} requires ${JSON.stringify(required)}`,
+          errorDescription: description,
           scope,
         }),
         requiredScopes: [...required],
+        grantedScopes: [...granted],
         tool,
       },
     };
   }
+
+  // (helper definitions live at module scope below)
 
   private denyPolicyUnavailable(description: string): AuthorizeResult {
     return {
@@ -329,4 +349,38 @@ export class Runtime {
       },
     };
   }
+}
+
+/** Build the human-readable scope-denial message used in both the JSON body
+ *  and the `WWW-Authenticate` header. langchain-mcp-adapters and similar
+ *  surface this string back to the agent, so it must read like an
+ *  actionable sentence — not a Python repr or `JSON.stringify(...)` blob. */
+function formatScopeMessage(tool: string, required: string[], granted: string[]): string {
+  const reqStr = required.length > 0 ? required.join(', ') : '(none discoverable)';
+  if (granted.length > 0) {
+    const grantStr = granted.join(', ');
+    return (
+      `Tool '${tool}' requires scope: ${reqStr}. ` +
+      `Your token has: ${grantStr}. ` +
+      `Ask an AuthSec admin to grant the missing scope, or use a tool that fits your current scopes.`
+    );
+  }
+  return (
+    `Tool '${tool}' requires scope: ${reqStr}. ` +
+    `Your token does not include this scope. ` +
+    `Ask an AuthSec admin to grant it, or use a tool that fits your current scopes.`
+  );
+}
+
+/** Map a free-text 401 description to a stable, parseable subreason. */
+function classifyAuthReason(description: string): string {
+  const m = (description || '').toLowerCase();
+  if (m.includes('revoked') && (m.includes('registration') || m.includes('client'))) {
+    return 'client_registration_revoked';
+  }
+  if (m.includes('revoked')) return 'token_revoked';
+  if (m.includes('expired') || m.includes('expir')) return 'token_expired';
+  if (m.includes('audience')) return 'audience_mismatch';
+  if (m.includes('missing') || m.includes('bearer')) return 'no_token';
+  return 'invalid_token';
 }

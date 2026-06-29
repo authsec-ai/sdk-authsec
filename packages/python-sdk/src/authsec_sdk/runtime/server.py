@@ -71,12 +71,39 @@ def principal_from_context() -> Optional[Principal]:
 
 
 class InsufficientScopeError(Exception):
-    """Raised by :meth:`Runtime.authorize_tool` when scopes don't satisfy policy."""
+    """Raised by :meth:`Runtime.authorize_tool` when scopes don't satisfy policy.
 
-    def __init__(self, tool: str, required: list[str]) -> None:
+    Carries optional ``granted`` so the error response can tell the user
+    *what they have* alongside *what they need* — turns an opaque "you can't
+    do this" into "you have [a, b], you need [c]; ask your admin to grant c".
+    """
+
+    def __init__(self, tool: str, required: list[str], granted: list[str] | None = None) -> None:
         self.tool = tool
         self.required = list(required)
-        super().__init__(f"insufficient scope for tool {tool!r}: requires one of {required}")
+        self.granted = list(granted) if granted is not None else []
+        msg = _format_scope_message(tool, self.required, self.granted)
+        super().__init__(msg)
+
+
+def _format_scope_message(tool: str, required: list[str], granted: list[str]) -> str:
+    """Build the human-readable error message used in WWW-Authenticate +
+    JSON body. langchain-mcp-adapters and similar libraries surface this
+    string back to the agent, so it must read like an actionable sentence,
+    not a Python repr."""
+    req_str = ", ".join(required) if required else "(none discoverable)"
+    if granted:
+        granted_str = ", ".join(granted)
+        return (
+            f"Tool '{tool}' requires scope: {req_str}. "
+            f"Your token has: {granted_str}. "
+            f"Ask an AuthSec admin to grant the missing scope, or use a tool that fits your current scopes."
+        )
+    return (
+        f"Tool '{tool}' requires scope: {req_str}. "
+        f"Your token does not include this scope. "
+        f"Ask an AuthSec admin to grant it, or use a tool that fits your current scopes."
+    )
 
 
 class PolicyUnavailableError(Exception):
@@ -208,7 +235,12 @@ class Runtime:
 
     async def authorize_tool(self, principal: Principal, tool_name: str) -> None:
         """Raise :class:`InsufficientScopeError` /
-        :class:`PolicyUnavailableError` if the call is not allowed."""
+        :class:`PolicyUnavailableError` if the call is not allowed.
+
+        ``InsufficientScopeError`` carries the principal's granted scopes so
+        the resulting HTTP/WWW-Authenticate response can tell the caller
+        exactly what they have vs. what they need.
+        """
         if self._policy_mode == PolicyMode.OPEN:
             return
 
@@ -221,15 +253,22 @@ class Runtime:
                 )
             tool_map = self.cfg.tool_scopes or {}
 
+        granted = list(principal.scopes)
         result, required = lookup_tool(tool_map, tool_name)
         if result == ToolPolicyResult.PUBLIC:
             return
         if result == ToolPolicyResult.ABSENT:
-            raise InsufficientScopeError(tool_name, required=["<tool not in policy>"])
-        granted = set(principal.scopes)
-        if any(s in granted for s in required):
+            # Tool exists in MCP but no AuthSec scope mapping — surface the
+            # gap clearly instead of a cryptic "<tool not in policy>".
+            raise InsufficientScopeError(
+                tool_name,
+                required=[f"<no scope mapping for tool '{tool_name}'>"],
+                granted=granted,
+            )
+        granted_set = set(granted)
+        if any(s in granted_set for s in required):
             return
-        raise InsufficientScopeError(tool_name, required=required)
+        raise InsufficientScopeError(tool_name, required=required, granted=granted)
 
     async def _resolve_tool_map(self) -> Optional[ToolScopeMap]:
         if self._scope_client is not None:
@@ -367,40 +406,79 @@ def _extract_bearer(authorization_header: str) -> str:
 
 
 def _unauthorized(cfg: Config, message: str, *, error: str = "") -> Any:
+    """Return a 401 with a structured `WWW-Authenticate` challenge.
+
+    The body includes a stable ``reason`` field that AuthSec client SDKs can
+    parse to disambiguate (a) bad/missing token, (b) expired token, (c)
+    revoked token, (d) revoked client registration — without scraping the
+    free-text ``error_description``.
+    """
     from starlette.responses import JSONResponse
 
+    err_code = error or "invalid_token"
+    reason = _classify_auth_reason(message)
     headers = {
         "WWW-Authenticate": build_www_authenticate(
             cfg,
-            error=error or "invalid_token",
+            error=err_code,
             error_description=message,
         ),
     }
     return JSONResponse(
-        {"error": error or "invalid_token", "error_description": message},
+        {
+            "error": err_code,
+            "error_description": message,
+            "reason": reason,
+        },
         status_code=401,
         headers=headers,
     )
 
 
+def _classify_auth_reason(message: str) -> str:
+    """Map a free-text 401 message to a stable, parseable reason code."""
+    m = (message or "").lower()
+    if "revoked" in m and ("registration" in m or "client" in m):
+        return "client_registration_revoked"
+    if "revoked" in m:
+        return "token_revoked"
+    if "expired" in m or "expir" in m:
+        return "token_expired"
+    if "audience" in m:
+        return "audience_mismatch"
+    if "missing" in m or "bearer" in m:
+        return "no_token"
+    return "invalid_token"
+
+
 def _insufficient_scope(cfg: Config, err: InsufficientScopeError) -> Any:
+    """Return a 403 with both a human-readable message AND structured fields.
+
+    The human-readable ``error_description`` is what most MCP client libraries
+    (e.g. langchain-mcp-adapters) surface back to the agent — so it must
+    read like a sentence. The structured fields (``tool``, ``required_scopes``,
+    ``granted_scopes``) let well-behaved client SDKs parse the error
+    programmatically without scraping strings.
+    """
     from starlette.responses import JSONResponse
 
     scope = " ".join(err.required) if err.required else ""
+    description = str(err)  # Uses InsufficientScopeError.__str__ — already actionable.
     headers = {
         "WWW-Authenticate": build_www_authenticate(
             cfg,
             error="insufficient_scope",
-            error_description=f"tool {err.tool!r} requires {err.required!r}",
+            error_description=description,
             scope=scope,
         ),
     }
     return JSONResponse(
         {
             "error": "insufficient_scope",
-            "error_description": f"tool {err.tool!r} requires one of {err.required!r}",
+            "error_description": description,
             "tool": err.tool,
             "required_scopes": err.required,
+            "granted_scopes": err.granted,
         },
         status_code=403,
         headers=headers,

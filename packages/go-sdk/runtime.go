@@ -30,16 +30,33 @@ func (e ErrPolicyUnavailable) Unwrap() error {
 // ErrInsufficientScope is returned by AuthorizeTool when the token's scopes
 // are insufficient for the requested tool, or the tool is not in the policy map.
 // RequiredScopes carries the already-resolved scopes — callers must NOT re-fetch policy.
+// GrantedScopes carries the scopes the principal does have, so the response
+// can read "you have [a,b], you need [c]" instead of just "you need [c]".
 type ErrInsufficientScope struct {
 	ToolName       string
 	RequiredScopes []string
+	GrantedScopes  []string
 }
 
 func (e ErrInsufficientScope) Error() string {
-	if len(e.RequiredScopes) == 0 {
-		return fmt.Sprintf("tool %q is not permitted (not listed in policy or insufficient scope)", e.ToolName)
+	req := joinScopesOrUnknown(e.RequiredScopes)
+	if len(e.GrantedScopes) > 0 {
+		return fmt.Sprintf(
+			"Tool %q requires scope: %s. Your token has: %s. Ask an AuthSec admin to grant the missing scope, or use a tool that fits your current scopes.",
+			e.ToolName, req, strings.Join(e.GrantedScopes, ", "),
+		)
 	}
-	return fmt.Sprintf("insufficient scope for tool %q: requires one of %v", e.ToolName, e.RequiredScopes)
+	return fmt.Sprintf(
+		"Tool %q requires scope: %s. Your token does not include this scope. Ask an AuthSec admin to grant it, or use a tool that fits your current scopes.",
+		e.ToolName, req,
+	)
+}
+
+func joinScopesOrUnknown(s []string) string {
+	if len(s) == 0 {
+		return "(unknown)"
+	}
+	return strings.Join(s, ", ")
 }
 
 // Runtime is the core enforcement engine.
@@ -299,16 +316,25 @@ func (rt *Runtime) AuthorizeTool(ctx context.Context, principal *Principal, tool
 		return nil
 	}
 
+	granted := principal.Scopes
 	result, required := m.LookupTool(toolName)
 	switch result {
 	case ToolPolicyAbsent:
 		// Tool not in policy map → deny by default when a policy exists.
-		return ErrInsufficientScope{ToolName: toolName, RequiredScopes: nil}
+		return ErrInsufficientScope{
+			ToolName:       toolName,
+			RequiredScopes: []string{fmt.Sprintf("<no scope mapping for tool %q>", toolName)},
+			GrantedScopes:  granted,
+		}
 	case ToolPolicyPublic:
 		return nil
 	case ToolPolicyScoped:
 		if !principal.HasAnyScope(required) {
-			return ErrInsufficientScope{ToolName: toolName, RequiredScopes: required}
+			return ErrInsufficientScope{
+				ToolName:       toolName,
+				RequiredScopes: required,
+				GrantedScopes:  granted,
+			}
 		}
 		return nil
 	default:
@@ -430,24 +456,81 @@ func (rt *Runtime) dispatchAuthError(w http.ResponseWriter, err error) {
 }
 
 func (rt *Runtime) writeUnauthorized(w http.ResponseWriter) {
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata=%q`, BuildResourceMetadataURL(rt.cfg.ResourceURI)))
-	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	rt.writeUnauthorizedReason(w, "invalid bearer token", "invalid_token")
+}
+
+// writeUnauthorizedReason writes a 401 with a structured JSON body plus the
+// classic WWW-Authenticate challenge. The body's `reason` field is a stable,
+// machine-parseable subcode (token_revoked, client_registration_revoked,
+// token_expired, audience_mismatch, no_token, invalid_token) that the client
+// SDKs use to fork between "re-auth" and "ask admin to re-approve".
+func (rt *Runtime) writeUnauthorizedReason(w http.ResponseWriter, description, reason string) {
+	if reason == "" {
+		reason = classifyAuthReason(description)
+	}
+	if description == "" {
+		description = "Unauthorized"
+	}
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
+		`Bearer error="invalid_token", resource_metadata=%q, error_description=%q`,
+		BuildResourceMetadataURL(rt.cfg.ResourceURI),
+		description,
+	))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
+	body := map[string]any{
+		"error":             "invalid_token",
+		"error_description": description,
+		"reason":            reason,
+	}
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// classifyAuthReason maps a free-text 401 description to a stable subcode.
+func classifyAuthReason(description string) string {
+	m := strings.ToLower(description)
+	switch {
+	case strings.Contains(m, "revoked") && (strings.Contains(m, "registration") || strings.Contains(m, "client")):
+		return "client_registration_revoked"
+	case strings.Contains(m, "revoked"):
+		return "token_revoked"
+	case strings.Contains(m, "expired") || strings.Contains(m, "expir"):
+		return "token_expired"
+	case strings.Contains(m, "audience"):
+		return "audience_mismatch"
+	case strings.Contains(m, "missing") || strings.Contains(m, "bearer"):
+		return "no_token"
+	default:
+		return "invalid_token"
+	}
 }
 
 // writeInsufficientScope writes a 403 using already-resolved scope data.
-// Never consults toolScopeMap again.
+// Body includes both a human-readable error_description (used by transports
+// that flatten the response) AND structured fields (tool, required_scopes,
+// granted_scopes) so client SDKs can fork on type without scraping strings.
 func (rt *Runtime) writeInsufficientScope(w http.ResponseWriter, e ErrInsufficientScope) {
 	scopeStr := strings.Join(e.RequiredScopes, " ")
 	if scopeStr == "" {
 		scopeStr = "(unknown)"
 	}
+	description := e.Error()
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
 		`Bearer error="insufficient_scope", scope=%q, resource_metadata=%q, error_description=%q`,
 		scopeStr,
 		BuildResourceMetadataURL(rt.cfg.ResourceURI),
-		"Additional scopes required or tool is not permitted: "+e.ToolName,
+		description,
 	))
-	http.Error(w, "Forbidden: insufficient scopes", http.StatusForbidden)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	body := map[string]any{
+		"error":             "insufficient_scope",
+		"error_description": description,
+		"tool":              e.ToolName,
+		"required_scopes":   e.RequiredScopes,
+		"granted_scopes":    e.GrantedScopes,
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // writePolicyUnavailable writes a 503. This is NOT an OAuth authorization failure

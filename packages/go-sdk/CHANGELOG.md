@@ -1,5 +1,31 @@
 # Changelog — github.com/authsec-ai/sdk-authsec/packages/go-sdk
 
+## v0.4.0 — Actionable client error helpers + richer server denials
+
+**New `client` package** — import `github.com/authsec-ai/sdk-authsec/packages/go-sdk/client`
+for typed, actionable errors on the agent/caller side:
+
+- `ParseMCPError(source any) AccessError` — accepts `*http.Response`, `map[string]any`,
+  `[]byte`, `string`, or `error`; returns one of the typed errors below or nil.
+- `*ErrInsufficientScope` — tool name, required scopes, granted scopes.
+  `FormatForUser()` prints the actionable message ("Tool X requires scope Y; your token has Z").
+- `*ErrTokenRevoked` — token was explicitly revoked; re-auth needed.
+- `*ErrClientRegistrationRevoked` — OAuth client registration revoked by admin.
+- `*ErrAuthRequired` — expired, missing, or invalid token; includes stable `Reason` subcode.
+
+**Server-side improvements:**
+- `ErrInsufficientScope` gains `GrantedScopes []string` so the caller always
+  sees both what they need and what they have.
+- 403 body now includes `granted_scopes`; 401 body now includes a stable `reason`
+  subcode (`token_revoked`, `client_registration_revoked`, `token_expired`, etc.).
+- `AuthorizeTool` passes the principal's actual scopes into every scope-denial error.
+- `classifyAuthReason` maps free-text descriptions from upstream validators to
+  the stable subcodes above.
+
+**First-bind race hardened:** `BindClientToRS` now checks `RowsAffected` on the
+`home_workspace_id` stamp; a concurrent loser re-reads the actual home workspace
+and routes correctly to `pending_approval` instead of auto-approving cross-workspace.
+
 ## v0.3.1 — Lower scope-matrix cache TTLs (Phase H-2)
 
 **Lower scope-matrix cache TTLs.** ``defaultScopeMatrixTTL`` drops from 5 min

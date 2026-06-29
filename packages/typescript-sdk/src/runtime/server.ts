@@ -22,7 +22,7 @@
 import type { Config, ManifestToolInput } from './config.js';
 import { buildResourceMetadataPath, metadataJsonResponse } from './metadata.js';
 import type { Principal } from './principal.js';
-import { Runtime } from './runtime.js';
+import { Runtime, type AuthorizeDenial } from './runtime.js';
 
 /**
  * Set ``WWW-Authenticate`` defensively. The header value comes through
@@ -131,6 +131,21 @@ export async function mountMCP(
 
     const result = await runtime.authorize(token, '');
     if (!result.allowed) {
+      if (shouldPassThroughMcpHandshake(token, req.body, result.denial)) {
+        next();
+        return;
+      }
+
+      if (shouldReturnMcpToolAuthError(token, req.body, result.denial)) {
+        res.status(200).json(mcpToolAuthErrorPayload(req.body, result.denial));
+        return;
+      }
+
+      if (shouldReturnMcpJsonRpcAuthError(token, req.body, result.denial)) {
+        res.status(200).json(mcpJsonRpcAuthErrorPayload(req.body, result.denial));
+        return;
+      }
+
       safeSetWwwAuthenticate(res, result.denial.wwwAuthenticate);
       const body: Record<string, unknown> = {
         error:
@@ -140,7 +155,9 @@ export async function mountMCP(
         error_description: result.denial.description,
       };
       if (result.denial.requiredScopes) body.required_scopes = result.denial.requiredScopes;
+      if (result.denial.grantedScopes) body.granted_scopes = result.denial.grantedScopes;
       if (result.denial.tool) body.tool = result.denial.tool;
+      if (result.denial.reason) body.reason = result.denial.reason;
       res.status(result.denial.status).json(body);
       return;
     }
@@ -148,6 +165,16 @@ export async function mountMCP(
     for (const toolId of extractToolIdsFromBody(req.body)) {
       const toolResult = await runtime.authorizePrincipal(result.principal, toolId);
       if (!toolResult.allowed) {
+        if (shouldReturnMcpToolAuthError(token, req.body, toolResult.denial)) {
+          res.status(200).json(mcpToolAuthErrorPayload(req.body, toolResult.denial));
+          return;
+        }
+
+        if (shouldReturnMcpJsonRpcAuthError(token, req.body, toolResult.denial)) {
+          res.status(200).json(mcpJsonRpcAuthErrorPayload(req.body, toolResult.denial));
+          return;
+        }
+
         safeSetWwwAuthenticate(res, toolResult.denial.wwwAuthenticate);
         const body: Record<string, unknown> = {
           error:
@@ -157,7 +184,9 @@ export async function mountMCP(
           error_description: toolResult.denial.description,
         };
         if (toolResult.denial.requiredScopes) body.required_scopes = toolResult.denial.requiredScopes;
+        if (toolResult.denial.grantedScopes) body.granted_scopes = toolResult.denial.grantedScopes;
         if (toolResult.denial.tool) body.tool = toolResult.denial.tool;
+        if (toolResult.denial.reason) body.reason = toolResult.denial.reason;
         res.status(toolResult.denial.status).json(body);
         return;
       }
@@ -222,6 +251,174 @@ function isToolsListRequest(body: unknown): boolean {
   if (!body || typeof body !== 'object') return false;
   if (Array.isArray(body)) return body.some(isToolsListRequest);
   return (body as Record<string, unknown>).method === 'tools/list';
+}
+
+function isToolsCallRequest(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  if (Array.isArray(body)) return body.some(isToolsCallRequest);
+  return (body as Record<string, unknown>).method === 'tools/call';
+}
+
+function isJsonRpcRequest(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  if (Array.isArray(body)) return body.some(isJsonRpcRequest);
+  return (body as Record<string, unknown>).jsonrpc === '2.0';
+}
+
+function isMcpHandshakeRequest(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  if (Array.isArray(body)) {
+    return body.length > 0 && body.every(isMcpHandshakeRequest);
+  }
+  const method = (body as Record<string, unknown>).method;
+  return method === 'initialize' || method === 'notifications/initialized' || method === 'ping';
+}
+
+function shouldHandleMcpAuthDenialInBand(
+  token: string,
+  body: unknown,
+  denial: AuthorizeDenial,
+): boolean {
+  if (!token) return false;
+  if (denial.status !== 401 && denial.status !== 403) return false;
+  return isJsonRpcRequest(body);
+}
+
+function shouldPassThroughMcpHandshake(
+  token: string,
+  body: unknown,
+  denial: AuthorizeDenial,
+): boolean {
+  return shouldHandleMcpAuthDenialInBand(token, body, denial) && isMcpHandshakeRequest(body);
+}
+
+function shouldReturnMcpToolAuthError(
+  token: string,
+  body: unknown,
+  denial: AuthorizeDenial,
+): boolean {
+  return shouldHandleMcpAuthDenialInBand(token, body, denial) && isToolsCallRequest(body);
+}
+
+function shouldReturnMcpJsonRpcAuthError(
+  token: string,
+  body: unknown,
+  denial: AuthorizeDenial,
+): boolean {
+  return shouldHandleMcpAuthDenialInBand(token, body, denial);
+}
+
+function mcpToolAuthErrorPayload(body: unknown, denial: AuthorizeDenial): unknown {
+  if (Array.isArray(body)) {
+    return body
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => mcpToolAuthErrorForRequest(item as Record<string, unknown>, denial));
+  }
+
+  const request =
+    body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  return mcpToolAuthErrorForRequest(request, denial);
+}
+
+function mcpJsonRpcAuthErrorPayload(body: unknown, denial: AuthorizeDenial): unknown {
+  if (Array.isArray(body)) {
+    return body
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => mcpJsonRpcAuthErrorForRequest(item as Record<string, unknown>, denial));
+  }
+
+  const request =
+    body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  return mcpJsonRpcAuthErrorForRequest(request, denial);
+}
+
+function mcpToolAuthErrorForRequest(
+  request: Record<string, unknown>,
+  denial: AuthorizeDenial,
+): Record<string, unknown> {
+  const id = validJsonRpcId(request.id) ? request.id : null;
+  const text = friendlyAuthDenialMessage(denial);
+  const authsec: Record<string, unknown> = {
+    error:
+      denial.code === 'scope_insufficient'
+        ? 'insufficient_scope'
+        : denial.code,
+    status: denial.status,
+    error_description: denial.description,
+  };
+  if (denial.requiredScopes) authsec.required_scopes = denial.requiredScopes;
+  if (denial.grantedScopes) authsec.granted_scopes = denial.grantedScopes;
+  if (denial.tool) authsec.tool = denial.tool;
+  if (denial.reason) authsec.reason = denial.reason;
+
+  return {
+    jsonrpc: '2.0',
+    id,
+    result: {
+      content: [{ type: 'text', text }],
+      isError: true,
+      _meta: { authsec },
+    },
+  };
+}
+
+function mcpJsonRpcAuthErrorForRequest(
+  request: Record<string, unknown>,
+  denial: AuthorizeDenial,
+): Record<string, unknown> {
+  const id = validJsonRpcId(request.id) ? request.id : null;
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code: denial.status === 403 ? -32003 : -32001,
+      message: friendlyAuthDenialMessage(denial),
+      data: { authsec: authsecDenialMeta(denial) },
+    },
+  };
+}
+
+function validJsonRpcId(id: unknown): id is string | number | null {
+  return id === null || typeof id === 'string' || typeof id === 'number';
+}
+
+function authsecDenialMeta(denial: AuthorizeDenial): Record<string, unknown> {
+  const authsec: Record<string, unknown> = {
+    error:
+      denial.code === 'scope_insufficient'
+        ? 'insufficient_scope'
+        : denial.code,
+    status: denial.status,
+    error_description: denial.description,
+  };
+  if (denial.requiredScopes) authsec.required_scopes = denial.requiredScopes;
+  if (denial.tool) authsec.tool = denial.tool;
+  return authsec;
+}
+
+function friendlyAuthDenialMessage(denial: AuthorizeDenial): string {
+  if (denial.status === 403) {
+    const parts: string[] = [];
+    if (denial.tool) parts.push(`Tool '${denial.tool}' cannot be called with this token.`);
+    else parts.push('This action cannot be performed with this token.');
+    if (denial.requiredScopes?.length) {
+      parts.push(`Required scope: ${denial.requiredScopes.join(', ')}.`);
+    }
+    if (denial.grantedScopes?.length) {
+      parts.push(`Your token has: ${denial.grantedScopes.join(', ')}.`);
+    } else {
+      parts.push('Your token does not include the required scope.');
+    }
+    parts.push('Ask an admin to grant the required scope to your role, or use a different tool.');
+    return parts.join(' ');
+  }
+  if (denial.reason === 'token_revoked') {
+    return 'Access has been revoked. The user needs to re-authenticate to get a new token.';
+  }
+  if (denial.reason === 'client_registration_revoked') {
+    return 'This client\'s registration has been revoked by an admin. Re-authentication will not help — contact the workspace admin.';
+  }
+  return 'Token is invalid or expired. The user needs to sign in again.';
 }
 
 function wrapToolsListResponse(

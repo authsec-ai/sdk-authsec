@@ -1,5 +1,27 @@
 # Changelog — @authsec/sdk (TypeScript)
 
+## 4.4.6 — Graceful MCP session + tool authorization denials
+
+Revoked or inactive OAuth consent can make introspection return ``active=false``
+after an MCP client already has an established session. Previously the runtime
+returned a transport-level HTTP 401 for the next streamable HTTP request, which
+caused some MCP clients to raise a raw HTTP exception and show a stack trace.
+
+The Express runtime now preserves the HTTP 401 + ``WWW-Authenticate`` challenge
+for missing bearer tokens and discovery flows, but handles revoked bearer tokens
+in-band for MCP JSON-RPC traffic:
+
+- ``initialize`` / ``notifications/initialized`` / ``ping`` pass through so a
+  streamable HTTP session can finish setup.
+- ``tools/call`` returns an MCP ``isError`` tool result with a plain
+  "Unauthorized to perform this action" message.
+- Other JSON-RPC methods return a JSON-RPC auth error over HTTP 200.
+
+Structured denial details are still available under ``_meta.authsec`` or
+``error.data.authsec``.
+
+No API changes. Drop-in patch upgrade.
+
 ## 4.4.2 — Hotfixes: header sanitizer + lower cache TTLs (Phase H-1 / H-2)
 
 **1. WWW-Authenticate header sanitizer (H-1).** Node ``TypeError [ERR_INVALID_CHAR]:
