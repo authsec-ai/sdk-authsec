@@ -1,6 +1,6 @@
 {
   "name": "@authsec/sdk",
-  "version": "4.4.4",
+  "version": "4.6.1",
   "description": "AuthSec SDK for MCP Auth, Services, CIBA, and SPIFFE integration (TypeScript/JavaScript)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,6 +16,7 @@
     "clean": "rm -rf dist",
     "example:memory": "node examples/memory-authsec-wrapper.mjs",
     "example:memory:local": "npm run build && npm run example:memory",
+    "test:runtime-denials": "npm run build && node tests/test_runtime_denials.mjs",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [

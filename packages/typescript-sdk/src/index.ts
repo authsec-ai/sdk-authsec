@@ -84,7 +84,7 @@ export type {
 } from './types.js';
 export { SimpleSession } from './types.js';
 
-export const VERSION = '4.6.0';
+export const VERSION = '4.6.1';
 
 // Runtime API (Go/Python parity)
 export * from './runtime/index.js';
