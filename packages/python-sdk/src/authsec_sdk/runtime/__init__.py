@@ -94,6 +94,7 @@ from .server import (
     extractToolIdsFromBody,
     mount_mcp,
     principal_from_context,
+    wrap_asgi_handler,
 )
 from .validator import (
     HybridValidator,
@@ -146,6 +147,7 @@ __all__ = [
     "Runtime",
     "mount_mcp",
     "principal_from_context",
+    "wrap_asgi_handler",
     # New (TypeScript parity)
     "AuthorizeResult",
     "AuthorizeDenial",

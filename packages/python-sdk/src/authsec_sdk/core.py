@@ -458,13 +458,13 @@ def _evaluate_rbac(user_info, requirements):
     raw_scopes = _normalize_claim_list(user_info.get("scopes")) | _normalize_claim_list(user_info.get("scope"))
 
     user_resources = _normalize_claim_list(user_info.get("resources"))
-    user_resources |= {s.split(":", 1)[0] for s in raw_scopes if "\:" in s}
+    user_resources |= {s.split(":", 1)[0] for s in raw_scopes if ":" in s}
 
-    user_scopes = {s for s in raw_scopes if "\:" not in s}
-    user_scopes |= {s.split(":", 1)[1] for s in raw_scopes if "\:" in s}
+    user_scopes = {s for s in raw_scopes if ":" not in s}
+    user_scopes |= {s.split(":", 1)[1] for s in raw_scopes if ":" in s}
 
     user_perms = _normalize_claim_list(user_info.get("permissions"))
-    user_perms |= {s for s in raw_scopes if "\:" in s}
+    user_perms |= {s for s in raw_scopes if ":" in s}
 
     checks = {}
     if roles_req:

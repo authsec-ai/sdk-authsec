@@ -65,6 +65,22 @@ from .principal import Principal
 from .scope_matrix import PolicyIncompleteError, ScopeMatrixClient
 from .validator import HybridValidator, TokenInactiveError, TokenInvalidError, new_validator
 
+# Starlette / FastAPI — optional import at module level so the module can be
+# imported cleanly without starlette installed; mount_mcp checks _STARLETTE_OK
+# at call time.  Having them here also lets get_type_hints() on inner closures
+# work correctly in Python 3.14+: annotations are resolved via __globals__
+# (the module dict), not the local scope of the enclosing function.
+try:
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response, StreamingResponse
+    _STARLETTE_OK = True
+except ImportError:
+    _STARLETTE_OK = False
+    Request = None  # type: ignore[misc,assignment]
+    JSONResponse = None  # type: ignore[misc,assignment]
+    Response = None  # type: ignore[misc,assignment]
+    StreamingResponse = None  # type: ignore[misc,assignment]
+
 _LOG = logging.getLogger("authsec.runtime")
 
 # Context var so async handlers downstream can read the principal without
@@ -779,6 +795,111 @@ def _safe_set_www_authenticate(headers: dict, value: str) -> None:
             pass
 
 
+# ── ASGI-app → Starlette-handler adapter ─────────────────────────────────────
+
+
+def _wrap_asgi_as_handler(asgi_app: Any) -> Callable[..., Awaitable[Any]]:
+    """Convert a raw ASGI callable (scope, receive, send) into a Starlette handler.
+
+    For non-streaming responses (``application/json`` etc.) the body is fully
+    buffered so that ``tools/list`` scope-filtering can read and rewrite it.
+    For SSE responses (``text/event-stream``) the body is forwarded via a
+    :class:`~starlette.responses.StreamingResponse` — ``tools/list`` filtering
+    is skipped for those because the body cannot be buffered mid-stream.
+
+    Pass any ASGI app::
+
+        mount_mcp(app, "/mcp", wrap_asgi_handler(mcp.streamable_http_app()), cfg)
+
+    Or let :func:`mount_mcp` detect a FastMCP instance automatically::
+
+        mount_mcp(app, "/mcp", mcp, cfg)
+    """
+    async def _handler(request: Any) -> Any:
+        resp_status: list[int] = [500]
+        resp_raw_headers: list[list] = [[]]
+        body_parts: list[bytes] = []
+        headers_ready: asyncio.Event = asyncio.Event()
+        body_done: asyncio.Event = asyncio.Event()
+        is_streaming: list[bool] = [False]
+        body_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                resp_status[0] = message["status"]
+                resp_raw_headers[0] = list(message.get("headers", []))
+                for k, v in resp_raw_headers[0]:
+                    kb = k if isinstance(k, bytes) else k.encode()
+                    vb = v if isinstance(v, bytes) else v.encode()
+                    if kb.lower() == b"content-type" and b"text/event-stream" in vb:
+                        is_streaming[0] = True
+                headers_ready.set()
+            elif message["type"] == "http.response.body":
+                chunk = message.get("body", b"")
+                if is_streaming[0]:
+                    if chunk:
+                        await body_queue.put(chunk)
+                    if not message.get("more_body", False):
+                        await body_queue.put(None)
+                else:
+                    if chunk:
+                        body_parts.append(chunk)
+                    if not message.get("more_body", False):
+                        body_done.set()
+
+        task = asyncio.create_task(asgi_app(request.scope, request._receive, _send))
+
+        def _on_done(t: Any) -> None:
+            if not headers_ready.is_set():
+                headers_ready.set()
+            if not body_done.is_set():
+                body_done.set()
+            body_queue.put_nowait(None)
+
+        task.add_done_callback(_on_done)
+        await headers_ready.wait()
+
+        out_headers: dict[str, str] = {}
+        content_type = "application/octet-stream"
+        for k, v in resp_raw_headers[0]:
+            ks = k.decode("latin-1") if isinstance(k, bytes) else k
+            vs = v.decode("latin-1") if isinstance(v, bytes) else v
+            if ks.lower() == "content-type":
+                content_type = vs
+            if ks.lower() != "content-length":
+                out_headers[ks] = vs
+
+        if is_streaming[0]:
+            async def _body_gen():
+                while True:
+                    chunk = await body_queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+                if not task.done():
+                    await task
+
+            return StreamingResponse(
+                _body_gen(), status_code=resp_status[0], headers=out_headers
+            )
+
+        await body_done.wait()
+        body = b"".join(body_parts)
+        return Response(
+            content=body,
+            status_code=resp_status[0],
+            media_type=content_type,
+            headers=out_headers,
+        )
+
+    return _handler
+
+
+#: Public alias — pass any ASGI app to get a Starlette-style handler suitable
+#: for use with :func:`mount_mcp`.
+wrap_asgi_handler = _wrap_asgi_as_handler
+
+
 # ── ASGI middleware — mount_mcp wraps an existing MCP handler ─────────────────
 
 
@@ -805,11 +926,17 @@ def mount_mcp(
     - ``tools/list`` responses are filtered by the principal's scopes.
     - Batch JSON-RPC requests are handled correctly.
     """
-    try:
-        from starlette.requests import Request
-        from starlette.responses import JSONResponse, Response
-    except ImportError as e:
-        raise RuntimeError("mount_mcp requires Starlette/FastAPI") from e
+    if not _STARLETTE_OK:
+        raise RuntimeError(
+            "mount_mcp requires Starlette/FastAPI: pip install starlette"
+        )
+
+    # Auto-detect FastMCP instances — callers can pass a FastMCP object
+    # directly instead of writing the boilerplate ASGI adapter themselves.
+    if hasattr(handler, "streamable_http_app") and callable(
+        getattr(handler, "streamable_http_app")
+    ):
+        handler = _wrap_asgi_as_handler(handler.streamable_http_app())
 
     rt = Runtime(cfg)
 
@@ -957,10 +1084,14 @@ def mount_mcp(
             _principal_ctx.reset(token_ctx)
 
     # ── Wire routes into Starlette / FastAPI ─────────────────────────────────
-    if hasattr(app, "add_api_route"):  # FastAPI
-        app.add_api_route(metadata_path, _metadata, methods=["GET"])
-        app.add_api_route(path, _protected, methods=["GET", "POST"])
-    else:  # plain Starlette
+    # Always use add_route (plain Starlette API) rather than add_api_route
+    # (FastAPI DI).  FastAPI inherits add_route from Starlette so it always
+    # exists, and it skips the get_type_hints / dependency-injection layer
+    # that breaks for closures whose annotations can't resolve from __globals__.
+    if hasattr(app, "add_route"):
+        app.add_route(metadata_path, _metadata, methods=["GET"])
+        app.add_route(path, _protected, methods=["GET", "POST"])
+    else:
         from starlette.routing import Route
         app.routes.append(Route(metadata_path, _metadata, methods=["GET"]))
         app.routes.append(Route(path, _protected, methods=["GET", "POST"]))

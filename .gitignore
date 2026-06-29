@@ -24,3 +24,4 @@ node_modules/
 
 # Internal local tooling
 .claude/
+CLAUDE.md
