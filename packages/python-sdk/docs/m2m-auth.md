@@ -212,7 +212,7 @@ agent on the node attests your pod and issues it a short-lived (~5 min)
 JWT-SVID; AuthSec verifies it against your trust domain.
 
 Prerequisites (once per cluster/workload — see the SPIFFE section of
-[README-V2](../README-V2.md) for details):
+[README](../README.md) for details):
 
 1. SPIRE server + agents running; your workload has a registration entry
    mapping its pod selectors to a `spiffe://your-domain/your-workload` ID

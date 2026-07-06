@@ -156,7 +156,7 @@ Terms you'll meet across all guides:
 
 ## Reference
 
-- [README-V2.md](../README-V2.md) — condensed all-in-one reference (imports,
+- [README.md](../README.md) — condensed all-in-one reference (imports,
   package layout, error tables, CLI)
 - [examples/](../examples/) — runnable example servers
 - SDK version: **4.7.0**
