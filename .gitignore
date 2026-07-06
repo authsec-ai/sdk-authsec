@@ -25,3 +25,4 @@ node_modules/
 # Internal local tooling
 .claude/
 CLAUDE.md
+test_results.html

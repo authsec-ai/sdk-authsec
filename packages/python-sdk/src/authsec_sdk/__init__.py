@@ -1,20 +1,29 @@
 """authsec-sdk — Python SDK for AuthSec.
 
-Two API surfaces coexist:
+Package layout (by function):
 
-1. :mod:`authsec_sdk.runtime` — the modern, recommended way to protect an MCP
-   resource server. Mirrors the Go SDK one-for-one. Use ``mount_mcp(app,
-   path, handler, cfg)`` or build a :class:`Runtime` directly. See
-   ``examples/local_authsec_demo_server.py`` for a working FastAPI app.
+- :mod:`authsec_sdk.identity` — agent side: acquire tokens to CALL protected
+  MCP servers (:class:`AgentIdentity` M2M/XAA, :func:`browser_login`,
+  :class:`SpiffeWorkloadIdentity`).
+- :mod:`authsec_sdk.runtime` — server side: PROTECT an MCP resource server
+  (token validation, RBAC, RFC 9728 metadata). Use ``mount_mcp(app, path,
+  handler, cfg)`` or build a :class:`Runtime` directly.
+- :mod:`authsec_sdk.client` — typed errors for parsing AuthSec 401/403
+  responses on the agent side.
+- :mod:`authsec_sdk.integrations` — framework glue (LangGraph).
+- :mod:`authsec_sdk.spiffe` — SPIFFE Workload API (X.509-SVIDs, mTLS).
+- :mod:`authsec_sdk.ciba` / :mod:`authsec_sdk.delegation` — CIBA push
+  auth and delegation tokens.
+- :mod:`authsec_sdk._legacy` — the original decorator API
+  (:func:`protected_by_AuthSec`, :func:`run_mcp_server_with_oauth`),
+  preserved for back-compat; new deployments should use ``runtime``.
 
-2. Legacy decorators (:func:`protected_by_AuthSec`,
-   :func:`run_mcp_server_with_oauth`) — preserved for back-compat. New
-   deployments should use the runtime API.
-
-Both surfaces target the same AuthSec backend.
+Old module paths (``authsec_sdk.agent_identity``, ``.core``, ``.ciba_sdk``,
+``.delegation_sdk``, ``.spire_sdk``, ``.spiffe_identity``) still work but
+emit ``DeprecationWarning`` and will be removed in v5.
 """
 
-from .core import (
+from ._legacy.core import (
     mcp_tool,
     protected_by_AuthSec,
     run_mcp_server_with_oauth,
@@ -84,13 +93,14 @@ from .runtime import (
     PolicyUnavailableError,
 )
 
-# Import CIBA SDK for voice clients and passwordless authentication
-from .ciba_sdk import CIBAClient
+# CIBA — voice clients and passwordless authentication
+from .ciba import CIBAClient
 
-# Import Delegation SDK for AI agent trust delegation
-from .delegation_sdk import (
+# Delegation — AI agent trust delegation
+from .delegation import (
     DelegationClient,
     DelegationError,
+    DelegationResponse,
     DelegationTokenExpired,
     DelegationTokenNotFound,
 )
@@ -106,26 +116,15 @@ from .client import (
     parse_mcp_error,
 )
 
-# Import standalone SPIFFE Workload API SDK
-from .spiffe_workload_api import QuickStartSVID, WorkloadAPIClient
+# SPIFFE — Workload API (gRPC), quick-start SVID, mTLS material
+from .spiffe import QuickStartSVID, WorkloadAPIClient, WorkloadSVID
 
-# Also import SDK Manager SPIRE integration (optional)
-try:
-    from .spire_sdk import WorkloadSVID
-except ImportError:
-    WorkloadSVID = None
-
-# SPIFFE/SPIRE workload identity — JWT-SVID → Bearer token exchange
-from .spiffe_identity import (
-    SpiffeConfig,
-    SpiffeWorkloadIdentity,
-    SpiffeIdentityError,
-    SpiffeSvidFetchError,
-    SpiffeTokenExchangeError,
-)
-
-# Agent Identity SDK — client-side flow selection + M2M / XAA token acquisition
-from .agent_identity import (
+# Identity — agent-side token acquisition (M2M / XAA / SPIFFE exchange)
+from .identity import (
+    ClientAuth,
+    ClientSecretAuth,
+    PrivateKeyJwtAuth,
+    SpiffeSvidAuth,
     AgentIdentity,
     AuthSecIdentityError,
     PendingApprovalError,
@@ -136,14 +135,17 @@ from .agent_identity import (
     ResourceNotRegisteredError,
     CredentialInvalidError,
     WorkloadNotAttestedError,
-    # TypeScript parity: standalone polling helper
     poll_until_approved,
     PollOptions,
-    # Browser PKCE login helper
     browser_login,
+    SpiffeConfig,
+    SpiffeWorkloadIdentity,
+    SpiffeIdentityError,
+    SpiffeSvidFetchError,
+    SpiffeTokenExchangeError,
 )
 
-__version__ = "4.6.0"
+__version__ = "4.7.0"
 __all__ = [
     # ── Runtime SDK (modern) — TypeScript-parity additions ────────────────
     "Config",
@@ -230,6 +232,10 @@ __all__ = [
     "SpiffeSvidFetchError",
     "SpiffeTokenExchangeError",
     # ── Agent Identity (M2M / XAA token acquisition) ──────────────────────
+    "ClientAuth",
+    "ClientSecretAuth",
+    "PrivateKeyJwtAuth",
+    "SpiffeSvidAuth",
     "AgentIdentity",
     "AuthSecIdentityError",
     "PendingApprovalError",

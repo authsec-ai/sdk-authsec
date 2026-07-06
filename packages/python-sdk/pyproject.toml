@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "authsec-sdk"
-version = "4.5.0"
+version = "4.7.0"
 description = "AuthSec SDK for MCP auth, services, CIBA, and SPIFFE integration"
 readme = "README.md"
 requires-python = ">=3.10.11"
@@ -17,6 +17,7 @@ dependencies = [
   "cryptography>=42.0.0",
   "fastapi>=0.110.0",
   "grpcio>=1.60.0",
+  "httpx>=0.27.0",
   "protobuf>=5.29.0,<6.0.0",
   "pyjwt[crypto]>=2.8.0",
   "requests>=2.31.0",
@@ -45,4 +46,7 @@ where = ["src"]
 include = ["authsec_sdk*"]
 
 [tool.setuptools.package-data]
-authsec_sdk = ["spiffe_workload_api/api/*.proto"]
+authsec_sdk = ["spiffe/api/*.proto", "py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
