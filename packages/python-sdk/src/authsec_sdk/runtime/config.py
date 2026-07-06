@@ -99,7 +99,8 @@ class Config:
     jwks_url: str = ""
     introspection_url: str = ""
     introspection_client_id: str = ""
-    introspection_client_secret: str = ""
+    introspection_client_secret: str = field(default="", repr=False)
+    """Kept out of ``repr()`` so logging a Config never leaks the secret."""
     resource_uri: str = ""
     resource_name: str = ""
 
@@ -116,8 +117,12 @@ class Config:
     Empty list ``[]`` for a tool key marks it explicitly public.
     Absent key means denied when any policy is active."""
 
-    scope_matrix_ttl: timedelta = timedelta(minutes=5)
-    """How long the fetched tool→scope mapping is cached."""
+    scope_matrix_ttl: timedelta = timedelta(seconds=30)
+    """How long the fetched tool→scope mapping is cached.
+
+    30s default (tightened in 4.4.2) so admin RBAC changes propagate to MCP
+    servers quickly. Raise this for performance if slower policy propagation
+    is acceptable."""
 
     policy_mode: PolicyMode = PolicyMode.UNSET
     validation_mode: ValidationMode = ValidationMode.UNSET

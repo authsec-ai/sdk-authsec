@@ -109,24 +109,24 @@ class TestConfigValidation:
 
 class TestLookupTool:
     def test_absent_when_map_none(self):
-        result, scopes = lookup_tool(None, "foo")
-        assert result == ToolPolicyResult.ABSENT
-        assert scopes == []
+        result = lookup_tool(None, "foo")
+        assert result.outcome == "absent"
+        assert result.required_any == []
 
     def test_absent_when_not_in_map(self):
-        result, scopes = lookup_tool({"other": ["read"]}, "foo")
-        assert result == ToolPolicyResult.ABSENT
-        assert scopes == []
+        result = lookup_tool({"other": ["read"]}, "foo")
+        assert result.outcome == "absent"
+        assert result.required_any == []
 
     def test_public_when_empty_list(self):
-        result, scopes = lookup_tool({"foo": []}, "foo")
-        assert result == ToolPolicyResult.PUBLIC
-        assert scopes == []
+        result = lookup_tool({"foo": []}, "foo")
+        assert result.outcome == "public"
+        assert result.required_any == []
 
     def test_scoped(self):
-        result, scopes = lookup_tool({"foo": ["read", "write"]}, "foo")
-        assert result == ToolPolicyResult.SCOPED
-        assert scopes == ["read", "write"]
+        result = lookup_tool({"foo": ["read", "write"]}, "foo")
+        assert result.outcome == "scoped"
+        assert result.required_any == ["read", "write"]
 
     def test_required_scopes_helper(self):
         assert required_scopes({"foo": ["a"]}, "foo") == ["a"]
@@ -205,5 +205,6 @@ class TestMetadataPaths:
         )
         assert 'error="insufficient_scope"' in header
         assert 'scope="read"' in header
-        # quotes in error_description must be escaped
-        assert 'error_description="needs \\"read\\""' in header
+        # Embedded double-quotes are converted to apostrophes by the header
+        # sanitizer (safer than backslash-escaping inside a quoted-string).
+        assert 'error_description="needs \'read\'"' in header
