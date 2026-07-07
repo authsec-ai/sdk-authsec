@@ -46,28 +46,10 @@ any time — killing the agent's access without touching the user's own.
 
 The SDK does all of this in one `access_for()` call:
 
-```
-user                 agent (your code)              AuthSec               MCP server
-  │                          │                         │                       │
-  │   1. browser_login()     │                         │                       │
-  │◀──── opens browser ──────│                         │                       │
-  │   logs in + consents     │                         │                       │
-  │   to requested scopes    │                         │                       │
-  │──────── id_token ───────▶│                         │                       │
-  │                          │                         │                       │
-  │                          │   2. token-exchange     │                       │
-  │                          │   (id_token → ID-JAG)   │                       │
-  │                          │────────────────────────▶│                       │
-  │                          │◀─────── ID-JAG ─────────│                       │
-  │                          │   3. jwt-bearer         │                       │
-  │                          │   (ID-JAG → access token)                       │
-  │                          │────────────────────────▶│                       │
-  │                          │◀─ scoped access token ──│                       │
-  │                          │   4. tools/call with Bearer token               │
-  │                          │────────────────────────────────────────────────▶│
-  │                          │◀─────────────────── result ─────────────────────│
-  │                          │                         │                       │
-```
+1. **`browser_login()`** — opens the browser, user logs in and consents to the requested scopes → returns an `id_token`
+2. **Token-exchange** — the SDK sends the `id_token` to AuthSec → receives an **ID-JAG** (Identity Assertion JWT)
+3. **jwt-bearer** — the SDK redeems the ID-JAG at the target server's authorization server → receives a **scoped access token** (`sub` = the user, `act.client_id` = the agent)
+4. **`tools/call`** — the agent calls the MCP server with `Authorization: Bearer <token>` → tool executes with the user's permissions
 
 Step 1 happens once per user session; steps 2–3 are invisible; the token is
 cached until near expiry.
