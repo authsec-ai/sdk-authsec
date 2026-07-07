@@ -54,8 +54,13 @@ independently of any user session"*. Click **＋ Create service account**:
 
 The filters show the credential split at a glance (Credential (M2M) /
 Kubernetes / No credential), and the **Auth method** column shows what each
-account holds. Creating one is the same two steps for every method: pick
-the auth method, then grant access. The methods differ only in the middle.
+account holds.
+
+> Methods **A and B** are created here (pick the auth method, then grant
+> access). Method **C (SPIFFE)** takes a different path — as its option card
+> says, it's *"configured per MCP server"*: you register a trust domain once
+> under **Trusted Issuers**, then connect the workload from the app's
+> **Access** tab. Full walkthrough in Method C below.
 
 ---
 
@@ -206,18 +211,128 @@ the old entry. No dashboard changes, no downtime.
 
 ## Method C — Kubernetes / SPIFFE
 
-The dashboard's third option says it best: *"Your pod presents a SPIFFE
-SVID at runtime."* There is **no stored credential at all** — the SPIRE
-agent on the node attests your pod and issues it a short-lived (~5 min)
-JWT-SVID; AuthSec verifies it against your trust domain.
+The strongest method: **no stored credential at all**. The SPIRE agent on
+the node attests your pod and issues it a short-lived (~5 min) JWT-SVID;
+AuthSec verifies it against your registered trust domain. Nothing to leak,
+nothing to rotate.
 
-Prerequisites (once per cluster/workload — see the SPIFFE section of
-[README](../README.md) for details):
+```
+your pod ──(unix socket)──▶ SPIRE agent ──▶ JWT-SVID (5 min)
+   │                                            │
+   └── SDK sends SVID as client assertion ──────┘
+                    │
+                    ▼
+        AuthSec verifies against your trust domain's
+        OIDC discovery (the "workload identity provider")
+                    │
+                    ▼
+              scoped access token
+```
 
-1. SPIRE server + agents running; your workload has a registration entry
-   mapping its pod selectors to a `spiffe://your-domain/your-workload` ID
-2. In AuthSec: a workload client registered with that exact SPIFFE ID and
-   the trust domain's JWKS
+Setup is three parts: your cluster (once), the trust registration (once),
+and the workload connection (per app).
+
+### C1. Cluster side — SPIRE (once per cluster)
+
+You need a running SPIRE deployment with:
+
+1. **SPIRE server + agents** (the standard [SPIRE quickstart](https://spiffe.io/docs/latest/try/getting-started-k8s/))
+2. **A registration entry** mapping your pod's selectors to a SPIFFE ID:
+   ```bash
+   spire-server entry create \
+     -spiffeID spiffe://your-trust-domain/your-workload \
+     -parentID spiffe://your-trust-domain/spire-agent \
+     -selector k8s:ns:default -selector k8s:sa:your-service-account
+   ```
+3. **The OIDC discovery endpoint exposed** (spire-oidc-discovery-provider) —
+   a public URL where AuthSec can fetch your trust domain's keys. This URL
+   becomes the **Issuer URL** in the next step.
+4. **The agent socket mounted into your workload pod** — the SDK reads
+   SVIDs from the SPIRE agent's unix socket, so your pod spec needs:
+   ```yaml
+   volumes:
+     - name: spire-agent-socket
+       hostPath: { path: /run/spire/sockets, type: Directory }
+   containers:
+     - name: your-app
+       volumeMounts:
+         - name: spire-agent-socket
+           mountPath: /run/spire/sockets
+           readOnly: true
+   ```
+
+> Setting up SPIRE itself (server, agents, node attestation) is standard
+> SPIFFE infrastructure — follow the official quickstart above. This guide
+> only covers the parts specific to AuthSec.
+
+### C2. Register the trust domain (dashboard, once)
+
+Sidebar → **Trusted Issuers** → **Workload identity providers**. As the
+page says: *"Issuers your workloads authenticate with — SPIRE trust domains
+(any cluster) and OIDC federation (e.g. GitHub Actions). No secrets."*
+Click **＋ Add provider**:
+
+![Workload identity providers](images/spiffe-providers-list.png)
+
+Fill the form:
+
+![Add workload identity provider](images/spiffe-add-provider.png)
+
+- **Name** — a label, e.g. `prod-spire`
+- **Kind** — `SPIRE (SPIFFE)`
+- **Issuer URL** — your SPIRE OIDC discovery URL from C1.3
+- **Trust domain** — your SPIFFE trust domain (e.g. `authsec.local`)
+- **Allowed audiences** — leave empty: *defaults to this token endpoint*,
+  which is exactly what SVIDs must be minted for
+
+### C3. Connect the workload to your MCP app (per app)
+
+Open your application → **Access** tab → **Add access** → pick
+**Kubernetes workload, no secret**:
+
+![Add access — Kubernetes workload](images/spiffe-add-access.png)
+
+A four-step wizard opens ("Use SPIFFE/SPIRE so this pod can mint
+short-lived access tokens without a client secret"):
+
+**Step 1 — Workload.** Choose your SPIRE setup — **AuthSec-managed** (they
+mint the SPIFFE ID for you) or **Bring your own SPIRE** (federate the trust
+domain you registered in C2) — and name the workload:
+
+![Connect Kubernetes workload — step 1](images/spiffe-workload-step1.png)
+
+**Step 2 — Access.** Pick the role this workload gets on the MCP server
+(the roles from guide 1):
+
+![Connect Kubernetes workload — step 2, role](images/spiffe-workload-step2.png)
+
+**Step 3 — Trust.** Select your registered provider (e.g.
+`prod-spire · authsec.local`) and paste the **exact SPIFFE ID** from your
+registration entry (format: `spiffe://your-trust-domain/ns/prod/sa/api`).
+As the form warns: it *must match the SVID's `sub` exactly, and its trust
+domain must match the selected provider*. Click **Register workload**:
+
+![Connect Kubernetes workload — step 3, trust](images/spiffe-workload-step3.png)
+
+**Step 4 — Install.** Confirmation: *"Workload registered — no client
+secret was created. Configure SPIRE to issue this pod a JWT-SVID."* Read
+this screen closely:
+
+![Connect Kubernetes workload — step 4, install](images/spiffe-workload-step4.png)
+
+- **SPIFFE ID** — the workload's identity; the pod presents a short-lived
+  JWT-SVID for this ID instead of storing any secret
+- **SVID AUDIENCE (TOKEN ENDPOINT)** — the dashboard states the rule
+  explicitly: *"Fetch the SVID with `-audience
+  https://mcpauthz.com/oauth/token` — it must match exactly or the exchange
+  is rejected."*
+- **INSTALL SNIPPET** — a ready-made `spire-server entry create` command
+  for your cluster (fill in your namespace/service-account selectors)
+
+Click **Done** — the workload appears in the app's **Who has access** list
+as an active Machine identity with its role and effective scopes.
+
+### C4. Code
 
 Inside the pod, the SDK fetches and renews SVIDs automatically:
 
@@ -226,16 +341,17 @@ from authsec_sdk import SpiffeWorkloadIdentity, SpiffeConfig
 
 spiffe = SpiffeWorkloadIdentity(SpiffeConfig(
     mcp_server_url="https://your-mcp-server.example.com/mcp",
-    client_id="YOUR_SPIFFE_CLIENT_ID",
+    client_id="YOUR_SPIFFE_CLIENT_ID",           # from step 4 (Install)
     spiffe_id="spiffe://your-domain/your-workload",
     scopes=["test_mcp:read"],
+    # agent_socket_path="/run/spire/sockets/agent.sock",
 ))
 async with spiffe:
     token = await spiffe.access_for()
 ```
 
-Already hold an SVID (e.g. minted manually for testing)? Use the low-level
-class — but mind two hard-won rules:
+Already hold an SVID (e.g. minted manually for testing outside a pod)? Use
+the low-level class — but mind two hard-won rules:
 
 ```python
 agent = AgentIdentity(ISSUER, SPIFFE_CLIENT_ID, auth=SpiffeSvidAuth(svid))
@@ -244,6 +360,7 @@ agent = AgentIdentity(ISSUER, SPIFFE_CLIENT_ID, auth=SpiffeSvidAuth(svid))
 - **The SVID's audience must be the token endpoint**
   (`https://mcpauthz.com/oauth/token`) — an SVID minted with just the issuer
   as audience is rejected with *"token aud must include this token endpoint"*.
+  (This is why C2's "Allowed audiences" default is right.)
 - **SVIDs live ~5 minutes** — mint immediately before use;
   `SpiffeSvidAuth` does not refresh (use `SpiffeWorkloadIdentity` for that).
 

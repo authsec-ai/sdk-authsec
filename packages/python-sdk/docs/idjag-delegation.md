@@ -47,23 +47,26 @@ any time — killing the agent's access without touching the user's own.
 The SDK does all of this in one `access_for()` call:
 
 ```
-   user                agent (your code)                AuthSec              MCP server
-    │                        │                             │                     │
-    │  1. browser_login()    │                             │                     │
-    │◀───opens browser───────│                             │                     │
-    │   logs in + consents   │                             │                     │
-    │   to requested scopes  │                             │                     │
-    │────────id_token───────▶│                             │                     │
-    │                        │  2. token-exchange          │                     │
-    │                        │     (id_token → ID-JAG)     │                     │
-    │                        │────────────────────────────▶│                     │
-    │                        │◀───────ID-JAG───────────────│                     │
-    │                        │  3. jwt-bearer              │                     │
-    │                        │     (ID-JAG → access token) │                     │
-    │                        │────────────────────────────▶│                     │
-    │                        │◀──scoped access token───────│                     │
-    │                        │  4. tools/call with Bearer token────────────────▶ │
-    │                        │◀──────────────────────result──────────────────────│
+user                 agent (your code)              AuthSec               MCP server
+  │                          │                         │                       │
+  │   1. browser_login()     │                         │                       │
+  │◀──── opens browser ──────│                         │                       │
+  │   logs in + consents     │                         │                       │
+  │   to requested scopes    │                         │                       │
+  │──────── id_token ───────▶│                         │                       │
+  │                          │                         │                       │
+  │                          │   2. token-exchange     │                       │
+  │                          │   (id_token → ID-JAG)   │                       │
+  │                          │────────────────────────▶│                       │
+  │                          │◀─────── ID-JAG ─────────│                       │
+  │                          │   3. jwt-bearer         │                       │
+  │                          │   (ID-JAG → access token)                       │
+  │                          │────────────────────────▶│                       │
+  │                          │◀─ scoped access token ──│                       │
+  │                          │   4. tools/call with Bearer token               │
+  │                          │────────────────────────────────────────────────▶│
+  │                          │◀─────────────────── result ─────────────────────│
+  │                          │                         │                       │
 ```
 
 Step 1 happens once per user session; steps 2–3 are invisible; the token is
@@ -209,14 +212,23 @@ no admin involvement.
 
 Both sides can kill the delegation at any time:
 
-- **Per server** — the application's Connections tab → ⋮ on the connection →
-  revoke. The agent's next call fails with `ConnectionRevokedError`.
-- **Per agent** — the Agents page → ⋮ → revoke. The agents list shows the
-  status flip to `Revoked` (you can see two revoked agents in the screenshot
-  in step 1).
+**Per agent** — the **Agents** page → ⋯ menu → **Revoke connection**. The
+agent's status flips to `Revoked` (two revoked agents are visible in the
+list) and its next call fails with `ConnectionRevokedError`:
+
+![Agents list — Revoke connection](images/agent-revoke.png)
+
+**Per identity on the app** — the application's **Access** tab → *Who has
+access* list → ⋯ on the row → **Revoke access**. This works for any
+identity — agents, users, or machine identities — and only affects their
+access to *this* application:
+
+![Who has access — Revoke access](images/access-revoke.png)
 
 The user's own access is untouched — you're revoking *the agent's right to
-act for them*, not the user.
+act for them*, not the user. Note the *Who has access* list also shows how
+one user (e.g. `py5`) can hold different roles from different grants — each
+row is revocable independently.
 
 ---
 
