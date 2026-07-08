@@ -2,7 +2,6 @@ package authsec
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -145,7 +144,13 @@ type AgentIdentityConfig struct {
 	// ClientID is the OAuth client_id for this agent.
 	ClientID string
 	// ClientSecret is the client secret for client_secret_basic auth.
+	// It is shorthand for Auth = NewClientSecretAuth(ClientSecret) and is
+	// mutually exclusive with Auth — setting both panics in NewAgentIdentity.
 	ClientSecret string
+	// Auth is the client-authentication method (client_secret_basic,
+	// private_key_jwt, SPIFFE-SVID, …). When nil, it is derived from
+	// ClientSecret. Mutually exclusive with ClientSecret.
+	Auth ClientAuth
 	// IDPIssuer is the enterprise IdP issuer for XAA subject tokens. Required for XAA paths.
 	IDPIssuer string
 	// PreferredMode controls flow selection: "auto", "direct-only", or "xaa-allowed". Default: "auto".
@@ -258,6 +263,7 @@ type cachedToken struct {
 // It implements §10 of the Agent Identity spec.
 type AgentIdentity struct {
 	cfg        AgentIdentityConfig
+	auth       ClientAuth // resolved from cfg.Auth or cfg.ClientSecret; may be nil
 	httpClient *http.Client
 
 	cacheMu sync.RWMutex
@@ -265,7 +271,9 @@ type AgentIdentity struct {
 }
 
 // NewAgentIdentity creates a new AgentIdentity from the given config.
-// It panics if Issuer or ClientID are empty.
+// It panics if Issuer or ClientID are empty, or if both Auth and ClientSecret
+// are set (they are mutually exclusive — ClientSecret is shorthand for
+// Auth = NewClientSecretAuth(ClientSecret)).
 func NewAgentIdentity(cfg AgentIdentityConfig) *AgentIdentity {
 	if cfg.Issuer == "" {
 		panic("AgentIdentity: Issuer is required")
@@ -273,11 +281,22 @@ func NewAgentIdentity(cfg AgentIdentityConfig) *AgentIdentity {
 	if cfg.ClientID == "" {
 		panic("AgentIdentity: ClientID is required")
 	}
+	if cfg.Auth != nil && cfg.ClientSecret != "" {
+		panic("AgentIdentity: Auth and ClientSecret are mutually exclusive — " +
+			"ClientSecret is shorthand for Auth = NewClientSecretAuth(ClientSecret)")
+	}
 	if cfg.PreferredMode == "" {
 		cfg.PreferredMode = "auto"
 	}
+
+	auth := cfg.Auth
+	if auth == nil && cfg.ClientSecret != "" {
+		auth = NewClientSecretAuth(cfg.ClientSecret)
+	}
+
 	return &AgentIdentity{
 		cfg:        cfg,
+		auth:       auth,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		cache:      make(map[string]cachedToken),
 	}
@@ -562,13 +581,20 @@ func (a *AgentIdentity) requesterBootstrap(ctx context.Context, resource, tokenE
 	if len(o.requestedScopes) > 0 {
 		body.Set("scope", strings.Join(o.requestedScopes, " "))
 	}
+	// Assertion-based auth (private_key_jwt / SPIFFE) authenticates via body
+	// params; the assertion audience is the token endpoint.
+	for k, v := range a.authBodyParams(tokenEndpoint) {
+		body.Set(k, v)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, bootstrapURL, strings.NewReader(body.Encode()))
 	if err != nil {
 		return nil, &AuthSecIdentityError{Code: "bootstrap_failed", Message: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	a.setAuthHeader(req)
+	for k, v := range a.authHeaders() {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -705,12 +731,27 @@ func (a *AgentIdentity) discoverAS(ctx context.Context, asUrl string) (*asMetada
 // ── Token request helper ──────────────────────────────────────────────────────
 
 func (a *AgentIdentity) tokenRequest(ctx context.Context, tokenEndpoint string, body url.Values) (map[string]interface{}, error) {
+	// Merge client-auth body params (e.g. client_assertion for private_key_jwt /
+	// SPIFFE-SVID). client_secret_basic contributes none.
+	for k, v := range a.authBodyParams(tokenEndpoint) {
+		body.Set(k, v)
+	}
+
+	headers := a.authHeaders()
+	// Assertion-based auth carries no Authorization header, so the server needs
+	// an explicit client_id in the body (matches the raw protocol + Python SDK).
+	if _, hasAuthz := headers["Authorization"]; !hasAuthz && body.Get("client_id") == "" {
+		body.Set("client_id", a.cfg.ClientID)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(body.Encode()))
 	if err != nil {
 		return nil, &AuthSecIdentityError{Code: "server_error", Message: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	a.setAuthHeader(req)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -768,10 +809,21 @@ func (a *AgentIdentity) throwFromErrorBody(body map[string]interface{}, status i
 
 // ── Client auth ───────────────────────────────────────────────────────────────
 
-func (a *AgentIdentity) setAuthHeader(req *http.Request) {
-	if a.cfg.ClientSecret != "" {
-		creds := a.cfg.ClientID + ":" + a.cfg.ClientSecret
-		encoded := base64.StdEncoding.EncodeToString([]byte(creds))
-		req.Header.Set("Authorization", "Basic "+encoded)
+// authHeaders returns the HTTP headers contributed by the configured ClientAuth
+// (e.g. Authorization: Basic for client_secret_basic). Nil when no auth is set.
+func (a *AgentIdentity) authHeaders() map[string]string {
+	if a.auth == nil {
+		return nil
 	}
+	return a.auth.Headers(a.cfg.ClientID)
+}
+
+// authBodyParams returns the POST body params contributed by the configured
+// ClientAuth (e.g. client_assertion for private_key_jwt / SPIFFE-SVID). Nil
+// when no auth is set. tokenEndpoint is the assertion audience.
+func (a *AgentIdentity) authBodyParams(tokenEndpoint string) map[string]string {
+	if a.auth == nil {
+		return nil
+	}
+	return a.auth.BodyParams(a.cfg.ClientID, tokenEndpoint)
 }

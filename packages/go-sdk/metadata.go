@@ -90,5 +90,7 @@ func writeMetadata(w http.ResponseWriter, cfg Config, authoritativeScopes []stri
 		BearerMethodsSupported: append([]string(nil), cfg.BearerMethodsSupported...),
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// Mirror the Python/TS SDKs: the PRM document is safe to cache briefly.
+	w.Header().Set("Cache-Control", "public, max-age=300")
 	_ = json.NewEncoder(w).Encode(metadata)
 }

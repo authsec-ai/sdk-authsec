@@ -130,12 +130,16 @@ func TestWrapMCPHTTP_FiltersSSEToolsList(t *testing.T) {
 	}
 }
 
+// A JSON-RPC MCP client (token present) that hits an insufficient-scope
+// tools/call now gets an IN-BAND JSON-RPC result (HTTP 200, isError=true) so
+// the client surfaces a structured error — parity with the Python/TS SDKs.
+// Non-JSON-RPC callers still get HTTP 403 (see TestWrapMCPHTTP_NonJSONRPCToolCall_HTTP403).
 func TestWrapMCPHTTP_BlocksUnauthorizedToolCall(t *testing.T) {
 	cfg, token, cleanup := testConfig(t)
 	defer cleanup()
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		t.Fatal("handler must not be reached for an unauthorized tool call")
 	})
 
 	handler, err := WrapMCPHTTP(next, cfg)
@@ -143,16 +147,26 @@ func TestWrapMCPHTTP_BlocksUnauthorizedToolCall(t *testing.T) {
 		t.Fatalf("WrapMCPHTTP() error = %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_issue"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"create_issue"}}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 in-band, got %d", rec.Code)
 	}
-	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "insufficient_scope") {
-		t.Fatalf("expected insufficient scope challenge, got %q", got)
+	meta := decodeInbandToolError(t, rec.Body.Bytes())
+	if meta["error"] != "insufficient_scope" {
+		t.Fatalf("expected error=insufficient_scope, got %v", meta["error"])
+	}
+	if meta["tool"] != "create_issue" {
+		t.Fatalf("expected tool=create_issue, got %v", meta["tool"])
+	}
+	if !inbandScopesContain(meta["required_scopes"], "issues:write") {
+		t.Fatalf("expected required_scopes to include issues:write, got %v", meta["required_scopes"])
+	}
+	if !inbandScopesContain(meta["granted_scopes"], "issues:read") {
+		t.Fatalf("expected granted_scopes to include issues:read, got %v", meta["granted_scopes"])
 	}
 }
 
@@ -533,8 +547,16 @@ func TestAuthorizeTool_UnknownToolDenied_WhenPolicyExists(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for unknown tool, got %d", rec.Code)
+	// Deny-by-default surfaces in-band (200) for JSON-RPC MCP clients.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 in-band for unknown tool, got %d", rec.Code)
+	}
+	meta := decodeInbandToolError(t, rec.Body.Bytes())
+	if meta["error"] != "insufficient_scope" {
+		t.Fatalf("expected error=insufficient_scope for unknown tool, got %v", meta["error"])
+	}
+	if meta["tool"] != "unknown_tool" {
+		t.Fatalf("expected tool=unknown_tool, got %v", meta["tool"])
 	}
 }
 
@@ -551,6 +573,8 @@ func TestWrapMCPHTTP_BatchDeniesUnauthorizedTool(t *testing.T) {
 	}
 
 	// Token has issues:read; create_issue requires issues:write → denied.
+	// The whole batch fails; a JSON-RPC client receives an in-band array of
+	// error results (HTTP 200), one per request item (parity with Python/TS).
 	body := `[
 		{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_issues"}},
 		{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_issue"}}
@@ -560,8 +584,24 @@ func TestWrapMCPHTTP_BatchDeniesUnauthorizedTool(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for batch with unauthorized tool, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 in-band for batch with unauthorized tool, got %d", rec.Code)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("expected a JSON array of in-band results, got %s (%v)", rec.Body.String(), err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 in-band results (one per batch item), got %d", len(items))
+	}
+	for i, item := range items {
+		result, ok := item["result"].(map[string]any)
+		if !ok {
+			t.Fatalf("item %d: missing result object: %v", i, item)
+		}
+		if isErr, _ := result["isError"].(bool); !isErr {
+			t.Fatalf("item %d: expected isError=true, got %v", i, result["isError"])
+		}
 	}
 }
 
@@ -893,5 +933,312 @@ func testConfigRoot(t *testing.T) (Config, string, func()) {
 	return cfg, token, func() {
 		jwksServer.Close()
 		introspectionServer.Close()
+	}
+}
+
+// ── Python/TS parity: handshake pass-through + in-band errors + realm/cache ───
+
+// decodeInbandToolError parses an in-band tools/call error result and returns
+// the _meta.authsec object, failing the test if the shape is wrong.
+func decodeInbandToolError(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode in-band response: %v (body=%s)", err, string(body))
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing result object in %s", string(body))
+	}
+	if isErr, _ := result["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true in %s", string(body))
+	}
+	meta, ok := result["_meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing _meta in %s", string(body))
+	}
+	authsec, ok := meta["authsec"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing _meta.authsec in %s", string(body))
+	}
+	return authsec
+}
+
+func inbandScopesContain(v any, want string) bool {
+	arr, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range arr {
+		if s, ok := item.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// A token-present-but-invalid handshake request (initialize) passes through to
+// the wrapped handler so an MCP session survives a mid-session token expiry.
+func TestWrapMCPHTTP_HandshakePassThrough_InvalidToken(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+
+	reached := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05"}}`))
+	})
+
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	// "expired.invalid.jwt" is JWT-shaped (two dots) but fails verification.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}`,
+	))
+	req.Header.Set("Authorization", "Bearer expired.invalid.jwt")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !reached {
+		t.Fatal("expected handshake to pass through to the handler")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from passed-through handshake, got %d", rec.Code)
+	}
+}
+
+// With NO token, a handshake request must still be challenged (401) — pass-through
+// only applies when a token is present but invalid.
+func TestWrapMCPHTTP_HandshakeNoToken_Challenges(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be reached without a token")
+	})
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}`,
+	))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated handshake, got %d", rec.Code)
+	}
+}
+
+// A token-present-but-invalid tools/call returns an in-band error (200) carrying
+// the invalid_token code, not an HTTP 401.
+func TestWrapMCPHTTP_InvalidToken_InBandToolError(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be reached for an invalid token")
+	})
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_issues"}}`,
+	))
+	req.Header.Set("Authorization", "Bearer expired.invalid.jwt")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 in-band for invalid token, got %d", rec.Code)
+	}
+	meta := decodeInbandToolError(t, rec.Body.Bytes())
+	if meta["error"] != "invalid_token" {
+		t.Fatalf("expected error=invalid_token, got %v", meta["error"])
+	}
+}
+
+// A token-present-but-invalid non-tools/call JSON-RPC request returns an in-band
+// JSON-RPC error object (200) with code -32001.
+func TestWrapMCPHTTP_InvalidToken_InBandJSONRPCError(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be reached for an invalid token")
+	})
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":4,"method":"resources/list","params":{}}`,
+	))
+	req.Header.Set("Authorization", "Bearer expired.invalid.jwt")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 in-band for invalid token, got %d", rec.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rpcErr, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a JSON-RPC error object, got %s", rec.Body.String())
+	}
+	if code, _ := rpcErr["code"].(float64); code != -32001 {
+		t.Fatalf("expected code -32001 for a 401 denial, got %v", rpcErr["code"])
+	}
+}
+
+// A NON-JSON-RPC tools/call (no jsonrpc field) with a valid-but-underscoped
+// token still gets the classic HTTP 403 (in-band applies only to JSON-RPC).
+func TestWrapMCPHTTP_NonJSONRPCToolCall_HTTP403(t *testing.T) {
+	cfg, token, cleanup := testConfig(t)
+	defer cleanup()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be reached for an unauthorized tool call")
+	})
+	handler, err := WrapMCPHTTP(next, cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	// No "jsonrpc":"2.0" field → not a JSON-RPC caller → HTTP 403 fallback.
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+		`{"id":1,"method":"tools/call","params":{"name":"create_issue"}}`,
+	))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-JSON-RPC caller, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "insufficient_scope") {
+		t.Fatalf("expected insufficient_scope challenge, got %q", got)
+	}
+}
+
+// The 401 challenge carries realm= (parity with Python/TS) alongside resource_metadata=.
+func TestWrapMCPHTTP_Challenge_IncludesRealm(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+
+	handler, err := WrapMCPHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	got := rec.Header().Get("WWW-Authenticate")
+	if !strings.Contains(got, `realm="GitHub MCP Server"`) {
+		t.Fatalf("expected realm in challenge, got %q", got)
+	}
+	if !strings.Contains(got, "resource_metadata=") {
+		t.Fatalf("expected resource_metadata in challenge, got %q", got)
+	}
+}
+
+// The PRM metadata response sets Cache-Control (parity with Python/TS).
+func TestMetadata_SetsCacheControl(t *testing.T) {
+	cfg, _, cleanup := testConfig(t)
+	defer cleanup()
+
+	handler, err := WrapMCPHTTP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), cfg)
+	if err != nil {
+		t.Fatalf("WrapMCPHTTP() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, BuildResourceMetadataPath(cfg.ResourceURI), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Fatalf("expected Cache-Control public, max-age=300, got %q", got)
+	}
+}
+
+func TestFromEnv_ParsesConfig(t *testing.T) {
+	t.Setenv("AUTHSEC_ISSUER", "https://issuer.example.com")
+	// Exercise the legacy env-var aliases (JWKS_URI, INTROSPECTION_ENDPOINT/ID/
+	// SECRET, RESOURCE) alongside the canonical names.
+	t.Setenv("AUTHSEC_JWKS_URI", "https://issuer.example.com/oauth/jwks")
+	t.Setenv("AUTHSEC_INTROSPECTION_ENDPOINT", "https://issuer.example.com/oauth/introspect")
+	t.Setenv("AUTHSEC_INTROSPECTION_ID", "rs-1")
+	t.Setenv("AUTHSEC_INTROSPECTION_SECRET", "sec-1")
+	t.Setenv("AUTHSEC_RESOURCE", "https://mcp.example.com/mcp")
+	t.Setenv("AUTHSEC_RESOURCE_SERVER_ID", "rs-uuid")
+	t.Setenv("AUTHSEC_SUPPORTED_SCOPES", "issues:read, issues:write")
+	t.Setenv("AUTHSEC_TOOL_SCOPES_JSON", `{"list_issues":["issues:read"],"create_issue":["issues:write"]}`)
+	t.Setenv("AUTHSEC_POLICY_MODE", "enforce") // "enforce" alias → RemoteRequired
+	t.Setenv("AUTHSEC_VALIDATION_MODE", "jwt_and_introspect")
+	t.Setenv("AUTHSEC_PUBLISH_MANIFEST", "true")
+
+	cfg := FromEnv()
+
+	if cfg.JWKSURL != "https://issuer.example.com/oauth/jwks" {
+		t.Fatalf("legacy JWKS_URI alias not read: %q", cfg.JWKSURL)
+	}
+	if cfg.IntrospectionClientID != "rs-1" || cfg.IntrospectionClientSecret != "sec-1" {
+		t.Fatalf("legacy introspection aliases not read: %q / (secret redacted)", cfg.IntrospectionClientID)
+	}
+	if cfg.ResourceURI != "https://mcp.example.com/mcp" {
+		t.Fatalf("legacy RESOURCE alias not read: %q", cfg.ResourceURI)
+	}
+	if len(cfg.SupportedScopes) != 2 || cfg.SupportedScopes[0] != "issues:read" {
+		t.Fatalf("supported scopes not parsed: %v", cfg.SupportedScopes)
+	}
+	if got := cfg.ToolScopes["create_issue"]; len(got) != 1 || got[0] != "issues:write" {
+		t.Fatalf("tool scopes not parsed: %v", cfg.ToolScopes)
+	}
+	if cfg.PolicyMode != PolicyModeRemoteRequired {
+		t.Fatalf("expected enforce → PolicyModeRemoteRequired, got %v", cfg.PolicyMode)
+	}
+	if cfg.ValidationMode != ValidationModeJWTAndIntrospect {
+		t.Fatalf("expected jwt_and_introspect, got %v", cfg.ValidationMode)
+	}
+	if !cfg.PublishManifest {
+		t.Fatal("expected PublishManifest=true")
+	}
+
+	// The parsed config should validate cleanly (RemoteRequired needs an RS id + creds).
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("FromEnv config failed validation: %v", err)
+	}
+}
+
+// FromEnv leaves ToolScopes nil when unset so policy-mode inference matches the
+// contract (nil ToolScopes + no ResourceServerID → OPEN).
+func TestFromEnv_NoToolScopes_LeavesNil(t *testing.T) {
+	t.Setenv("AUTHSEC_ISSUER", "https://issuer.example.com")
+	t.Setenv("AUTHSEC_JWKS_URL", "https://issuer.example.com/oauth/jwks")
+	t.Setenv("AUTHSEC_RESOURCE_URI", "https://mcp.example.com/mcp")
+
+	cfg := FromEnv()
+	if cfg.ToolScopes != nil {
+		t.Fatalf("expected nil ToolScopes when unset, got %v", cfg.ToolScopes)
+	}
+	if cfg.effectivePolicyMode() != PolicyModeOpen {
+		t.Fatalf("expected OPEN when no RS id and no ToolScopes, got %v", cfg.effectivePolicyMode())
 	}
 }
