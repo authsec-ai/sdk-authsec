@@ -900,6 +900,74 @@ def _wrap_asgi_as_handler(asgi_app: Any) -> Callable[..., Awaitable[Any]]:
 wrap_asgi_handler = _wrap_asgi_as_handler
 
 
+# ── FastMCP auto-configuration ────────────────────────────────────────────────
+
+
+def _prepare_fastmcp_handler(
+    app: Any, fastmcp: Any, cfg: Config
+) -> Callable[..., Awaitable[Any]]:
+    """Make a FastMCP instance work behind ``mount_mcp`` with zero boilerplate.
+
+    With ``mcp >= 1.27`` a bare ``FastMCP`` instance needs three things the
+    caller would otherwise have to wire manually:
+
+    1. **Stateless HTTP** — direct JSON-RPC POSTs (no ``initialize``
+       handshake / ``mcp-session-id`` header) would fail with ``400``.
+    2. **Transport security** — mcp's DNS-rebinding protection only allows
+       localhost Host headers, so requests arriving via the server's public
+       URL (ngrok, a real domain) would get ``421 Invalid Host header``.
+       The public host is already known from ``cfg.resource_uri`` — it is
+       appended to the allow-list. Protection stays enabled and any
+       caller-provided entries are preserved.
+    3. **Session-manager lifespan** — without ``session_manager.run()`` every
+       request fails with ``500 Task group is not initialized``. Startup /
+       shutdown handlers are registered on ``app``. If the caller manages
+       the lifespan themselves (custom FastAPI ``lifespan=``), the
+       double-start is detected and skipped.
+    """
+    import contextlib
+    from urllib.parse import urlparse
+
+    settings = getattr(fastmcp, "settings", None)
+    if settings is not None:
+        settings.stateless_http = True
+        settings.json_response = True
+        ts = getattr(settings, "transport_security", None)
+        if ts is not None and getattr(ts, "enable_dns_rebinding_protection", False):
+            parsed = urlparse(cfg.resource_uri)
+            if parsed.netloc:
+                host = parsed.netloc
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                if host not in ts.allowed_hosts:
+                    ts.allowed_hosts.append(host)
+                if origin not in ts.allowed_origins:
+                    ts.allowed_origins.append(origin)
+
+    asgi_app = fastmcp.streamable_http_app()
+
+    # Start/stop the StreamableHTTP session manager with the host app.
+    stack = contextlib.AsyncExitStack()
+
+    async def _start_session_manager() -> None:
+        try:
+            await stack.enter_async_context(fastmcp.session_manager.run())
+        except RuntimeError:
+            # Already started — the caller runs it in their own lifespan.
+            pass
+
+    async def _stop_session_manager() -> None:
+        await stack.aclose()
+
+    if hasattr(app, "add_event_handler"):
+        app.add_event_handler("startup", _start_session_manager)
+        app.add_event_handler("shutdown", _stop_session_manager)
+    else:  # bare Starlette-compatible app without the helper
+        app.router.on_startup.append(_start_session_manager)
+        app.router.on_shutdown.append(_stop_session_manager)
+
+    return _wrap_asgi_as_handler(asgi_app)
+
+
 # ── ASGI middleware — mount_mcp wraps an existing MCP handler ─────────────────
 
 
@@ -933,10 +1001,12 @@ def mount_mcp(
 
     # Auto-detect FastMCP instances — callers can pass a FastMCP object
     # directly instead of writing the boilerplate ASGI adapter themselves.
+    # Stateless HTTP, transport security and the session-manager lifespan
+    # are configured automatically (see _prepare_fastmcp_handler).
     if hasattr(handler, "streamable_http_app") and callable(
         getattr(handler, "streamable_http_app")
     ):
-        handler = _wrap_asgi_as_handler(handler.streamable_http_app())
+        handler = _prepare_fastmcp_handler(app, handler, cfg)
 
     rt = Runtime(cfg)
 
@@ -1056,11 +1126,19 @@ def mount_mcp(
                         resp_payload = json.loads(resp_body)
                         filtered = await _filter_tools_list_payload(rt, principal, resp_payload)
                         filtered_bytes = json.dumps(filtered).encode("utf-8")
+                        # Drop content-length: the filtered body has a different
+                        # length than the original, and Starlette only computes
+                        # content-length when the header is absent.
+                        filtered_headers = {
+                            k: v
+                            for k, v in response.headers.items()
+                            if k.lower() != "content-length"
+                        }
                         return Response(
                             content=filtered_bytes,
                             status_code=response.status_code,
                             media_type="application/json",
-                            headers=dict(response.headers),
+                            headers=filtered_headers,
                         )
                 except Exception as filter_err:
                     # If filter error is an AuthorizeDenial (policy_unavailable),
