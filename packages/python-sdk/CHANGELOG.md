@@ -1,5 +1,29 @@
 # Changelog — authsec-sdk (Python)
 
+## 4.7.1 — mount_mcp works out of the box with mcp >= 1.27
+
+**E2E-verified against the live AuthSec server (2026-07-15): the documented
+one-line `mount_mcp` server, ID-JAG delegation (including live revocation),
+and M2M client-secret + private-key-JWT all pass.**
+
+### Fixed
+- **`mount_mcp` auto-configures FastMCP instances** — the documented
+  `mount_mcp(app, "/mcp", mcp, cfg)` one-liner now works unmodified with
+  `mcp >= 1.27`:
+  - starts the StreamableHTTP session manager with the host app's lifecycle
+    (was: `500 Task group is not initialized` on every request); a
+    caller-managed `session_manager.run()` lifespan is detected and honored
+  - enables stateless JSON responses so direct JSON-RPC POSTs work without
+    an `initialize` handshake (was: `400 Bad Request`)
+  - appends the host from `cfg.resource_uri` to FastMCP's DNS-rebinding
+    allow-list so requests via the server's public URL are accepted
+    (was: `421 Invalid Host header`); protection stays enabled and
+    caller-provided `transport_security` entries are preserved
+- **`tools/list` scope filtering no longer corrupts responses** — the filtered
+  body was sent with the original response's stale `Content-Length`, causing
+  uvicorn to abort the connection (`Response content longer than
+  Content-Length`); the header is now recomputed
+
 ## 4.7.0 — Three M2M auth methods, package restructure, security hardening
 
 **E2E-verified against the live AuthSec server (2026-07-05): ID-JAG delegation
