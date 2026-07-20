@@ -1,5 +1,12 @@
 # Changelog — authsec-sdk (Python)
 
+## 4.7.2 — JWT clock-skew leeway
+
+### Fixed
+- **30-second clock-skew tolerance** on JWT validation — tokens issued by a
+  server whose clock is slightly ahead or behind are no longer rejected as
+  expired/not-yet-valid within a 30-second window
+
 ## 4.7.1 — mount_mcp works out of the box with mcp >= 1.27
 
 **E2E-verified against the live AuthSec server (2026-07-15): the documented
