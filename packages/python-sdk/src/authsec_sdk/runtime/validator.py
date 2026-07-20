@@ -12,6 +12,7 @@ uses HTTP Basic auth with the configured ``introspection_client_id`` /
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from typing import Any, Optional
 
@@ -172,6 +173,7 @@ class HybridValidator:
                 # error messages.
                 options={"verify_aud": False, "verify_iss": True},
                 issuer=self.cfg.issuer or None,
+                leeway=datetime.timedelta(seconds=30),
             )
         except jwt.ExpiredSignatureError as e:
             raise TokenInvalidError("token expired") from e
