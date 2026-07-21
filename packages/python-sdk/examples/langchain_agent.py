@@ -18,6 +18,8 @@ denial a true error and fix the *handling*, not the *truth*.
 
 Run:
     pip install "authsec-sdk" langchain-mcp-adapters langgraph langchain-openai
+    export MCP_URL=https://your-protected-server.example.com/mcp
+    export AUTHSEC_ACCESS_TOKEN=<access-token-for-that-resource>
     python langchain_agent.py
 """
 
@@ -29,11 +31,13 @@ import os
 from authsec_sdk.client import authsec_tool_error_handler
 
 
-MCP_URL = os.environ.get("MCP_URL", "https://mcp-dev.app.authsec.ai/mcp")
+MCP_URL = os.environ["MCP_URL"]
 
 
 async def main() -> None:
-    from langgraph.prebuilt import create_react_agent
+    # LangChain v1's public agent factory.  It builds the ReAct graph (and its
+    # internal ToolNode) from the normal sequence of tools.
+    from langchain.agents import create_agent
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
     # Bring your own auth: obtain a bearer token however your flow does it
@@ -61,7 +65,7 @@ async def main() -> None:
         t.handle_tool_error = authsec_tool_error_handler
 
     model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-    agent = create_react_agent(model, tools)
+    agent = create_agent(model, tools)
 
     print("Type a message ('exit' to quit).")
     messages: list = []

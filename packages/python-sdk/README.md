@@ -13,6 +13,9 @@ One SDK, two sides of the same protocol:
 pip install authsec-sdk
 ```
 
+For an MCP server built with the official Python SDK, also install its current
+stable major version: `pip install "mcp>=1.27,<2"`.
+
 Requires Python ≥ 3.10. Fully typed (`py.typed` shipped — mypy/pyright see all hints).
 
 > 📚 **Step-by-step guides with dashboard screenshots** (protect a server,
@@ -68,7 +71,7 @@ codebases where import provenance matters:
 from authsec_sdk.identity import AgentIdentity, browser_login
 from authsec_sdk.runtime import mount_mcp, Config, from_env
 from authsec_sdk.client import parse_mcp_error, TokenRevokedError
-from authsec_sdk.integrations import wrap_for_langgraph   # ← only home of this one
+from authsec_sdk.integrations import authsec_tool_error_handler, wrap_for_langgraph
 from authsec_sdk.spiffe import QuickStartSVID, WorkloadAPIClient
 from authsec_sdk.ciba import CIBAClient
 from authsec_sdk.delegation import DelegationClient
@@ -358,12 +361,12 @@ mount_mcp(app, "/mcp", mcp, cfg)       # FastMCP instances are auto-detected
 
 Run it: `uvicorn server:app --host 0.0.0.0 --port 8000`
 
-> **Note — `tool_inventory_provider` is optional.** If you omit it, the SDK
-> enumerates your tools automatically at startup by performing a synthetic
-> MCP handshake (`initialize` → `tools/list`) against your own handler, so
-> the schemas come straight from your `@mcp.tool()` type hints — one source
-> of truth. Set it explicitly (as above) when you want a deterministic,
-> hand-curated manifest.
+> **Note — `tool_inventory_provider` is optional for FastMCP.** When you pass a
+> `FastMCP` instance, the SDK calls its official `list_tools()` API at startup,
+> so names and schemas come directly from your `@mcp.tool()` functions. Set an
+> explicit provider (as above) only when you want a hand-curated manifest. A
+> plain request handler must supply a provider or an in-process `rpc_handler`
+> if manifest publishing is enabled.
 
 `handler` (third argument to `mount_mcp`) accepts three forms:
 
@@ -534,12 +537,30 @@ if err is not None:
     print(err.format_for_user())
 ```
 
-LangGraph users get this wired up in one line:
+LangChain agents should attach the AuthSec handler to each discovered MCP tool
+and pass the normal tool list to the public ``create_agent`` factory:
 
 ```python
-from authsec_sdk.integrations import wrap_for_langgraph
-tool_node = wrap_for_langgraph(tools)    # denials become readable LLM messages
+from langchain.agents import create_agent
+from authsec_sdk.integrations import authsec_tool_error_handler
+
+for tool in tools:
+    tool.handle_tool_error = authsec_tool_error_handler
+
+agent = create_agent(model, tools)
 ```
+
+``wrap_for_langgraph(tools)`` is retained for custom graphs that explicitly
+need a ``ToolNode``; it is not the input to ``create_agent``.
+
+### Bearer-token separation
+
+The caller sends an **AuthSec access token** to the protected MCP endpoint.
+Credentials used by that MCP server to call an upstream system—such as a
+GitHub App token, Slack bot token, or database password—remain server-owned
+environment variables. Never forward the caller's AuthSec bearer token to the
+upstream API, and never replace it with the upstream credential on the MCP
+request.
 
 ---
 
@@ -553,8 +574,16 @@ authsec doctor        # inspect cached JWTs (client_id, scopes, expiry)
 
 ## Examples
 
+These are compact, executable SDK references. They are separate from the
+multi-component AuthSec product demo and are not part of the installed Python
+package.
+
 - `examples/protect_existing_mcp_server.py` — wrap an existing MCP handler
   with `mount_mcp` (server side, runnable)
+- `examples/demo_mcp_server.py` — small protected MCP server with real tools,
+  manifest publishing, and remote scope policy
+- `examples/langchain_agent.py` — call a protected MCP server from LangChain
+  using `create_agent` and AuthSec-aware tool errors
 - `examples/local_authsec_demo_server.py` — legacy decorator-API demo
 
 ## Development
@@ -568,6 +597,6 @@ pytest tests/test_runtime.py tests/test_config_flow.py   # unit tests
 
 ## Versioning
 
-Current: **4.7.0** (adds the three M2M client-auth methods —
+Current: **4.7.2** (adds the three M2M client-auth methods —
 `ClientSecretAuth`, `PrivateKeyJwtAuth`, `SpiffeSvidAuth`). Deprecated
 import paths (see table above) are kept throughout v4 and removed in v5.

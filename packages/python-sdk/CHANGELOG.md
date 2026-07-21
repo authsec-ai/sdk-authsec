@@ -1,5 +1,19 @@
 # Changelog — authsec-sdk (Python)
 
+## Unreleased
+
+### Fixed
+- Restored the public ``authsec_tool_error_handler`` export after the
+  ``client.langgraph`` → ``integrations.langgraph`` package move, while keeping
+  the old private-looking name as a compatibility alias.
+- Updated the LangChain integration and runnable agent example to use
+  ``langchain.agents.create_agent`` with per-tool error handling; the legacy
+  ``ToolNode`` wrapper remains available only for custom graphs.
+- FastMCP instances now provide their registered ``list_tools()`` inventory to
+  manifest publishing automatically, so AuthSec receives the schemas served by
+  the running MCP server rather than a duplicate hand-maintained list.
+- Corrected the source-distribution path for the moved SPIFFE workload proto.
+
 ## 4.7.2 — JWT clock-skew leeway
 
 ### Fixed

@@ -190,6 +190,26 @@ Expected error:
 Set AUTHSEC_CLIENT_ID before running
 ```
 
+## Client-Side Tool Errors
+
+Agent code can turn AuthSec 401/403 tool-call failures into actionable model
+observations without converting the denied request into a false success:
+
+```ts
+import { authsecToolErrorHandler } from "@authsec/sdk";
+
+const result = await callTool(name, args).catch(authsecToolErrorHandler);
+```
+
+## Bearer-Token Separation
+
+The caller sends an **AuthSec access token** to the protected MCP endpoint.
+Credentials used by the MCP server to call an upstream system—such as a
+GitHub App token, Slack bot token, or database password—must remain
+server-owned environment variables. The AuthSec bearer token must never be
+forwarded to the upstream API, and the upstream credential must never replace
+it on the MCP request.
+
 ## Environment Variables
 
 Required:

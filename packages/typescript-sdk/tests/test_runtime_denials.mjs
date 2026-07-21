@@ -156,9 +156,9 @@ await withInactiveIntrospection(async (introspectionUrl) => {
   assert(revokedRes.payload?.result?.isError === true, 'expected MCP tool isError payload');
   assert(
     String(revokedRes.payload.result.content?.[0]?.text).includes(
-      'Unauthorized to perform this action',
+      'Access has been revoked',
     ),
-    'expected friendly unauthorized message',
+    'expected actionable revoked-token message',
   );
   assert(
     revokedRes.payload.result._meta?.authsec?.error === 'invalid_token',
@@ -175,7 +175,7 @@ await withInactiveIntrospection(async (introspectionUrl) => {
   );
 
   assert(listRes.code === 200, `expected revoked tools/list HTTP 200, got ${listRes.code}`);
-  assert(listRes.payload?.error?.message?.includes('Unauthorized to perform this action'), 'expected JSON-RPC auth error');
+  assert(listRes.payload?.error?.message?.includes('Access has been revoked'), 'expected JSON-RPC auth error');
   assert(
     listRes.payload?.error?.data?.authsec?.error === 'invalid_token',
     'expected JSON-RPC authsec invalid_token metadata',

@@ -12,14 +12,14 @@ exceptions.
     tools = await client.get_tools()
     for t in tools:
         t.handle_tool_error = authsec_tool_error_handler
-    agent = create_react_agent(model, tools)
+    agent = create_agent(model, tools)
 
-Or use the ToolNode wrapper::
+For a custom LangGraph that explicitly needs a ToolNode::
 
     from authsec_sdk.client import wrap_for_langgraph
 
     tool_node = wrap_for_langgraph(tools)
-    agent = create_react_agent(model, tool_node)
+    # Add tool_node to your StateGraph; create_agent expects the raw tools.
 
 **Manual error handling**::
 
@@ -45,6 +45,8 @@ server-owned env var (``UPSTREAM_API_TOKEN``) — never in the same
 ``Authorization`` header.  The SDKs never mix the two layers.
 """
 
+from typing import Any
+
 from .errors import (
     AuthRequiredError,
     AuthSecAccessError,
@@ -53,8 +55,26 @@ from .errors import (
     TokenRevokedError,
     parse_mcp_error,
 )
-# Canonical home is authsec_sdk.integrations; re-exported here for back-compat.
-from ..integrations.langgraph import wrap_for_langgraph
+
+
+def authsec_tool_error_handler(error: Exception) -> str:
+    """Compatibility export for the canonical integrations helper.
+
+    The import is deliberately lazy.  ``integrations.langgraph`` depends on
+    ``client.errors``; importing it eagerly from this package initializer would
+    create a cycle when users import ``authsec_sdk.integrations`` first.
+    """
+    from ..integrations.langgraph import authsec_tool_error_handler as handler
+
+    return handler(error)
+
+
+def wrap_for_langgraph(tools: list[Any]) -> Any:
+    """Compatibility export for custom LangGraph ``ToolNode`` callers."""
+    from ..integrations.langgraph import wrap_for_langgraph as wrap
+
+    return wrap(tools)
+
 
 __all__ = [
     "AuthSecAccessError",

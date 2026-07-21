@@ -46,6 +46,7 @@ After mount:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from contextvars import ContextVar
@@ -903,6 +904,52 @@ wrap_asgi_handler = _wrap_asgi_as_handler
 # ── FastMCP auto-configuration ────────────────────────────────────────────────
 
 
+def _fastmcp_inventory_provider(
+    fastmcp: Any,
+) -> Callable[[], Awaitable[list[dict[str, Any]]]]:
+    """Expose FastMCP's registered tools to the manifest publisher.
+
+    ``FastMCP.list_tools`` is the authoritative view of the running server: it
+    contains the names, descriptions, and schemas generated from ``@mcp.tool``
+    functions.  Reading that list avoids a second, hand-maintained manifest and
+    makes an AuthSec tool refresh reflect the server that is actually running.
+    """
+
+    async def _inventory() -> list[dict[str, Any]]:
+        listed = fastmcp.list_tools()
+        if inspect.isawaitable(listed):
+            listed = await listed
+
+        inventory: list[dict[str, Any]] = []
+        for tool in listed:
+            if isinstance(tool, dict):
+                inventory.append(tool)
+                continue
+
+            annotations = getattr(tool, "annotations", None)
+            if hasattr(annotations, "model_dump"):
+                annotations = annotations.model_dump(
+                    by_alias=True,
+                    exclude_none=True,
+                )
+            elif not isinstance(annotations, dict):
+                annotations = None
+
+            inventory.append(
+                {
+                    "name": getattr(tool, "name", ""),
+                    "title": getattr(tool, "title", "") or "",
+                    "description": getattr(tool, "description", "") or "",
+                    "input_schema": getattr(tool, "inputSchema", None)
+                    or getattr(tool, "input_schema", None),
+                    "annotations": annotations,
+                }
+            )
+        return inventory
+
+    return _inventory
+
+
 def _prepare_fastmcp_handler(
     app: Any, fastmcp: Any, cfg: Config
 ) -> Callable[..., Awaitable[Any]]:
@@ -927,6 +974,15 @@ def _prepare_fastmcp_handler(
     """
     import contextlib
     from urllib.parse import urlparse
+
+    # Manifest publishing should discover the exact tools registered with the
+    # official MCP SDK.  Explicit customer providers still take precedence.
+    if (
+        cfg.publish_manifest
+        and cfg.tool_inventory_provider is None
+        and callable(getattr(fastmcp, "list_tools", None))
+    ):
+        cfg.tool_inventory_provider = _fastmcp_inventory_provider(fastmcp)
 
     settings = getattr(fastmcp, "settings", None)
     if settings is not None:

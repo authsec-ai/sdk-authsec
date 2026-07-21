@@ -51,10 +51,22 @@ the exact token format, error codes, and claim expectations.
 
 ## Examples (`packages/<sdk>/examples/`)
 
-Each example demonstrates one flow end-to-end. When writing or fixing an example:
+Examples are executable SDK documentation, not the AuthSec sales/demo
+application.  The dedicated demo may combine agents, servers, UI steps, and a
+scripted story; an SDK example should teach one integration decision with the
+fewest moving parts possible.
+
+Keep examples in the source repository when they let a developer verify the
+public API quickly.  They do not need to be included in the published wheel or
+npm tarball.  A full product demo belongs in the dedicated demo repository.
+
+Each SDK example demonstrates one flow end-to-end. When writing or fixing one:
 1. State which flow it demonstrates in the file header comment.
 2. Use environment variables for all secrets/URLs (never hardcode).
 3. Keep it runnable against the live deploy (`app.authsec.ai`) or a local stack.
+4. Keep the AuthSec integration visible; do not bury it in demo orchestration.
+5. Prefer one canonical example per integration pattern and remove superseded
+   examples instead of maintaining multiple versions of the same flow.
 
 ## Versioning
 
