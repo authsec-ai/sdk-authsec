@@ -54,7 +54,7 @@ the exact token format, error codes, and claim expectations.
 Each example demonstrates one flow end-to-end. When writing or fixing an example:
 1. State which flow it demonstrates in the file header comment.
 2. Use environment variables for all secrets/URLs (never hardcode).
-3. Keep it runnable against the live deploy (`mcpauthz.com`) or a local stack.
+3. Keep it runnable against the live deploy (`app.authsec.ai`) or a local stack.
 
 ## Versioning
 

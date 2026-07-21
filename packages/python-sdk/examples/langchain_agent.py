@@ -7,12 +7,10 @@ This is the *canonical, crash-proof* agent example. The point it demonstrates:
     actionable message so the model can tell the user what to do — while the
     denial itself stays a hard, observable error on the wire.
 
-The single line that makes this work is ``wrap_for_langgraph(tools)``. Without
-it, ``create_react_agent(model, tools)`` builds a ToolNode whose default error
-handler RE-RAISES ``ToolException`` — so an auth denial tears down the whole
-``ainvoke`` call with a traceback (see the langchain-mcp-adapters issue on
-Python 3.14 / LangGraph v1). With it, the denial becomes a ToolMessage the LLM
-reads and relays.
+Each tool is individually wrapped with ``handle_tool_error`` set to
+``authsec_tool_error_handler`` so that AuthSec 401/403 denials become
+actionable ToolMessages the LLM can read and relay — instead of crashing the
+agent loop with a traceback.
 
 Why we do NOT "soft-deny" (return a fake success): that would blind audit logs
 and anomaly detection — denials would look like successful calls. We keep the
@@ -28,17 +26,14 @@ from __future__ import annotations
 import asyncio
 import os
 
-# The one import that makes auth denials graceful instead of fatal.
-from authsec_sdk.client import wrap_for_langgraph
+from authsec_sdk.client import authsec_tool_error_handler
 
 
-MCP_URL = os.environ.get("MCP_URL", "https://mcp-dev.mcpauthz.com/mcp")
+MCP_URL = os.environ.get("MCP_URL", "https://mcp-dev.app.authsec.ai/mcp")
 
 
 async def main() -> None:
-    # These imports are deferred so the file documents its own dependencies
-    # without forcing them at import time for readers who just want the pattern.
-    from langchain.agents import create_agent  # LangGraph v1 location
+    from langgraph.prebuilt import create_react_agent
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
     # Bring your own auth: obtain a bearer token however your flow does it
@@ -59,13 +54,14 @@ async def main() -> None:
     tools = await client.get_tools()
 
     # ── The crash-proof bit ──────────────────────────────────────────────
-    # wrap_for_langgraph returns a ToolNode whose error handler converts any
-    # AuthSec 401/403 into an actionable string for the LLM. Pass THIS to the
-    # agent instead of the raw tools list.
-    tool_node = wrap_for_langgraph(tools)
+    # Enable LangChain v1 tool-error middleware on every tool so that any
+    # AuthSec 401/403 becomes an actionable ToolMessage for the LLM instead
+    # of crashing the agent loop. Pass the normal tool sequence to the agent.
+    for t in tools:
+        t.handle_tool_error = authsec_tool_error_handler
 
     model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-    agent = create_agent(model, tool_node)
+    agent = create_react_agent(model, tools)
 
     print("Type a message ('exit' to quit).")
     messages: list = []
@@ -75,8 +71,8 @@ async def main() -> None:
             break
         messages.append({"role": "user", "content": user})
 
-        # No try/except needed for auth denials — wrap_for_langgraph already
-        # turned them into tool messages. The loop never dies on a 401/403.
+        # No try/except needed for auth denials — handle_tool_error on each
+        # tool turns them into tool messages. The loop never dies on a 401/403.
         result = await agent.ainvoke({"messages": messages})
         messages = result["messages"]
         print(f"agent> {messages[-1].content}")

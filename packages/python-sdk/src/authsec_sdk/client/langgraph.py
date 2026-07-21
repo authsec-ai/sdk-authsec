@@ -1,29 +1,32 @@
-"""LangGraph integration helpers for AuthSec-protected MCP tools.
+"""LangGraph / LangChain v1 integration helpers for AuthSec-protected MCP tools.
 
-Provides ``wrap_for_langgraph`` — a one-liner that takes any list of MCP tools
-(from ``langchain_mcp_adapters``) and returns a ``ToolNode`` whose error
-handler converts AuthSec 401/403 denials into actionable LLM messages instead
-of crashing the graph.
+Two approaches, both crash-proof:
 
-Usage::
+**Per-tool middleware (recommended)**::
 
-    from langchain_mcp_adapters.client import MultiServerMCPClient
+    from authsec_sdk.client.langgraph import authsec_tool_error_handler
+
+    tools = await client.get_tools()
+    for t in tools:
+        t.handle_tool_error = authsec_tool_error_handler
+    agent = create_react_agent(model, tools)
+
+**ToolNode wrapper (legacy)**::
+
     from authsec_sdk.client.langgraph import wrap_for_langgraph
 
-    async with MultiServerMCPClient(...) as client:
-        tools = client.get_tools()
-        tool_node = wrap_for_langgraph(tools)
-        agent = create_react_agent(model, tool_node)
-        result = await agent.ainvoke({"messages": [...]})
+    tool_node = wrap_for_langgraph(tools)
+    agent = create_react_agent(model, tool_node)
 
-The agent will never crash on a scope denial or token revocation.  Instead the
-LLM receives an actionable message like:
+Both ensure that AuthSec 401/403 denials become actionable ``ToolMessage``
+strings the LLM can read and relay — instead of crashing the agent loop with
+a traceback.
+
+Example LLM-visible denial::
 
     "Tool 'slugify' cannot be called with this token. Required scope:
      demo_server:Admin. Your token has: demo_server:read, demo_server:write.
      Ask an admin to grant the required scope to your role."
-
-and can relay it to the user naturally.
 """
 
 from __future__ import annotations
@@ -40,12 +43,13 @@ from .errors import (
 )
 
 
-def _authsec_tool_error_handler(error: Exception) -> str:
+def authsec_tool_error_handler(error: Exception) -> str:
     """Convert any tool exception into an actionable LLM-readable string.
 
-    Tries to parse the error as an AuthSec access error first; falls back to a
-    generic representation so the LLM can still respond instead of the graph
-    crashing.
+    Assign to ``tool.handle_tool_error`` on each LangChain tool so that
+    AuthSec 401/403 denials become ``ToolMessage`` strings instead of
+    crashing the agent loop.  Falls back to a generic representation for
+    non-AuthSec errors.
     """
     access_err = parse_mcp_error(error)
     if access_err is not None:
@@ -53,6 +57,10 @@ def _authsec_tool_error_handler(error: Exception) -> str:
 
     # Non-AuthSec tool error — return as plain text so the LLM can respond.
     return f"Tool call failed: {error}"
+
+
+# Backward-compat alias (was underscore-prefixed before v4.5).
+_authsec_tool_error_handler = authsec_tool_error_handler
 
 
 def wrap_for_langgraph(tools: list[Any]) -> Any:
@@ -82,6 +90,8 @@ def wrap_for_langgraph(tools: list[Any]) -> Any:
 
 
 __all__ = [
+    "authsec_tool_error_handler",
     "wrap_for_langgraph",
+    # Backward compat — the underscore-prefixed name was public in v4.4.
     "_authsec_tool_error_handler",
 ]

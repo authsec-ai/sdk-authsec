@@ -23,6 +23,17 @@
 //	case *client.ErrAuthRequired:
 //	    reAuth()
 //	}
+//
+// Tool-error middleware:
+//
+//	msg := client.ToolErrorHandler(err)
+//	// msg is always a non-empty, LLM-readable string
+//
+// Bearer-token separation: AuthSec bearer tokens authenticate the agent
+// to the AuthSec authorization layer.  If the MCP server requires a
+// separate upstream credential (e.g. a GitHub PAT), that credential must
+// travel as a server-owned env var (UPSTREAM_API_TOKEN) — never in the
+// same Authorization header.  The SDK never mixes the two layers.
 package client
 
 import (
@@ -374,4 +385,21 @@ func filterScopeLooking(parts []string) []string {
 		return nil
 	}
 	return out
+}
+
+// ─── Tool-error middleware ──────────────────────────────────────────────
+
+// ToolErrorHandler converts any tool-call error into an actionable,
+// LLM-readable string. AuthSec 401/403 denials are parsed into
+// human-readable messages; other errors are stringified so the LLM can
+// still respond instead of the agent loop crashing.
+func ToolErrorHandler(err error) string {
+	if err == nil {
+		return ""
+	}
+	access := ParseMCPError(err)
+	if access != nil {
+		return access.FormatForUser()
+	}
+	return fmt.Sprintf("Tool call failed: %v", err)
 }

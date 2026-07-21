@@ -5,8 +5,16 @@ sits on the *agent* side — code calling an AuthSec-protected MCP server —
 and turns the raw 401 / 403 responses into typed, actionable Python
 exceptions.
 
-**LangGraph users** — use ``wrap_for_langgraph`` and never worry about
-ToolException crashes again::
+**LangChain / LangGraph users** — per-tool middleware (recommended)::
+
+    from authsec_sdk.client import authsec_tool_error_handler
+
+    tools = await client.get_tools()
+    for t in tools:
+        t.handle_tool_error = authsec_tool_error_handler
+    agent = create_react_agent(model, tools)
+
+Or use the ToolNode wrapper::
 
     from authsec_sdk.client import wrap_for_langgraph
 
@@ -27,6 +35,14 @@ ToolException crashes again::
                 re_authenticate()
         else:
             raise
+
+Bearer-token separation
+~~~~~~~~~~~~~~~~~~~~~~~
+AuthSec bearer tokens authenticate the *agent* to the AuthSec authorization
+layer.  If the MCP server itself requires a separate upstream credential
+(e.g. a GitHub PAT or Slack bot token), that credential must travel as a
+server-owned env var (``UPSTREAM_API_TOKEN``) — never in the same
+``Authorization`` header.  The SDKs never mix the two layers.
 """
 
 from .errors import (
@@ -37,7 +53,7 @@ from .errors import (
     TokenRevokedError,
     parse_mcp_error,
 )
-from .langgraph import wrap_for_langgraph
+from .langgraph import authsec_tool_error_handler, wrap_for_langgraph
 
 __all__ = [
     "AuthSecAccessError",
@@ -46,5 +62,6 @@ __all__ = [
     "ClientRegistrationRevokedError",
     "AuthRequiredError",
     "parse_mcp_error",
+    "authsec_tool_error_handler",
     "wrap_for_langgraph",
 ]

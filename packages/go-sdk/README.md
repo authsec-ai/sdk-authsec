@@ -551,7 +551,7 @@ Fix:
 
 ### Protected unauthenticated scan returns success but zero tools
 
-This is expected for a correctly protected MCP server. AuthSec cannot list tools anonymously when your MCP server returns `401`. Use SDK manifest publishing or authenticated scan.
+This is expected only for the background registration probe of a correctly protected MCP server. AuthSec cannot list tools anonymously when your MCP server returns `401`. An operator-triggered **Refresh Tools** requires a successful live `tools/list`; the console asks for a one-shot bearer token when the server challenges the scan. Since that token can receive a scope-filtered tool list, authenticated refresh merges visible tools without deleting unseen inventory. The SDK manifest remains the authoritative complete snapshot.
 
 ### Tools appear but activation is blocked
 
@@ -643,6 +643,22 @@ SDK manifest:
 ```text
 https://dev.api.authsec.dev/authsec/resource-servers/<resource-server-id>/sdk-manifest
 ```
+
+## Client-Side Error Handling (Agent Side)
+
+The `client` sub-package (`client/errors.go`) provides typed, actionable error helpers for code *calling* an AuthSec-protected MCP server. Use `ParseMCPError` to translate raw 401/403 responses into structured errors, and `ToolErrorHandler` to convert any tool-call error into an LLM-readable string:
+
+```go
+import "github.com/authsec-ai/sdk-authsec/packages/go-sdk/client"
+
+// In your agent's tool-call loop:
+msg := client.ToolErrorHandler(err)
+// msg is always a non-empty, LLM-readable string
+```
+
+## Bearer-Token Separation
+
+AuthSec bearer tokens authenticate the *agent* to the AuthSec authorization layer. If the MCP server itself requires a separate upstream credential (e.g. a GitHub PAT, Slack bot token, or database password), that credential must live as a server-owned environment variable (e.g. `UPSTREAM_API_TOKEN`) — **never in the same `Authorization` header** as the AuthSec token. The SDK enforces this by never forwarding the caller's bearer to upstream services.
 
 ## What You Should Not Build Yourself
 
