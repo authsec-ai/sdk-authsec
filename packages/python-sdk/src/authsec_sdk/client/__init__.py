@@ -53,7 +53,8 @@ from .errors import (
     TokenRevokedError,
     parse_mcp_error,
 )
-from .langgraph import authsec_tool_error_handler, wrap_for_langgraph
+# Canonical home is authsec_sdk.integrations; re-exported here for back-compat.
+from ..integrations.langgraph import wrap_for_langgraph
 
 __all__ = [
     "AuthSecAccessError",

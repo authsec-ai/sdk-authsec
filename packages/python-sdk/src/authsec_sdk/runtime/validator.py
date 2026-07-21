@@ -11,6 +11,8 @@ uses HTTP Basic auth with the configured ``introspection_client_id`` /
 
 from __future__ import annotations
 
+import asyncio
+import datetime
 import time
 from typing import Any, Optional
 
@@ -64,6 +66,21 @@ class HybridValidator:
                 cache_keys=True,
                 lifespan=3600,
             )
+        # Shared session for introspection calls — created lazily on first
+        # use so construction stays sync; reused for connection pooling.
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def aclose(self) -> None:
+        """Release the pooled HTTP session. Safe to call multiple times."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.cfg.request_timeout_seconds)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
 
     # ────────────────────────────────────────────────────────────
     # Public entry point
@@ -77,7 +94,7 @@ class HybridValidator:
         """
         mode = self._mode
         if mode == ValidationMode.JWT_ONLY:
-            return self._validate_jwt(token)
+            return await self._validate_jwt_async(token)
         if mode == ValidationMode.INTROSPECTION_ONLY:
             return self._check_active(await self._introspect(token))
         if mode == ValidationMode.JWT_AND_INTROSPECT:
@@ -99,7 +116,7 @@ class HybridValidator:
         looks_like_jwt = token.count(".") == 2
         jwt_principal: Optional[Principal] = None
         if looks_like_jwt:
-            jwt_principal = self._validate_jwt(token)
+            jwt_principal = await self._validate_jwt_async(token)
 
         introspected = await self._introspect(token)
         active = self._check_active(introspected)
@@ -112,7 +129,7 @@ class HybridValidator:
         """Either succeeds independently (legacy compatibility)."""
         jwt_err: Optional[Exception] = None
         try:
-            return self._validate_jwt(token)
+            return await self._validate_jwt_async(token)
         except Exception as e:  # noqa: BLE001 — we deliberately catch every JWT failure
             jwt_err = e
 
@@ -126,6 +143,16 @@ class HybridValidator:
     # ────────────────────────────────────────────────────────────
     # JWT path
     # ────────────────────────────────────────────────────────────
+
+    async def _validate_jwt_async(self, token: str) -> Principal:
+        """Run JWT verification in a worker thread.
+
+        PyJWKClient does blocking network I/O on a JWKS cache miss, which
+        would stall the event loop if called directly from async code.
+        """
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._validate_jwt, token
+        )
 
     def _validate_jwt(self, token: str) -> Principal:
         if self._jwks_client is None:
@@ -146,6 +173,7 @@ class HybridValidator:
                 # error messages.
                 options={"verify_aud": False, "verify_iss": True},
                 issuer=self.cfg.issuer or None,
+                leeway=datetime.timedelta(seconds=30),
             )
         except jwt.ExpiredSignatureError as e:
             raise TokenInvalidError("token expired") from e
@@ -174,20 +202,19 @@ class HybridValidator:
         auth = aiohttp.BasicAuth(
             self.cfg.introspection_client_id, self.cfg.introspection_client_secret
         )
-        timeout = aiohttp.ClientTimeout(total=self.cfg.request_timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                self.cfg.introspection_url,
-                data={"token": token},
-                auth=auth,
-                headers={"Accept": "application/json"},
-            ) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise TokenInvalidError(
-                        f"introspection returned HTTP {resp.status}: {body[:200]}"
-                    )
-                payload = await resp.json()
+        session = self._get_session()
+        async with session.post(
+            self.cfg.introspection_url,
+            data={"token": token},
+            auth=auth,
+            headers={"Accept": "application/json"},
+        ) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                raise TokenInvalidError(
+                    f"introspection returned HTTP {resp.status}: {body[:200]}"
+                )
+            payload = await resp.json()
 
         return Principal(
             subject=_str(payload.get("sub") or payload.get("subject")),

@@ -110,6 +110,8 @@ class ScopeMatrixClient:
         self._state = _CacheState()
         self._lock = asyncio.Lock()
         self._refreshing = False
+        # Keep a reference so the task isn't garbage-collected mid-flight.
+        self._refresh_task: Optional[asyncio.Task] = None
 
     # ────────────────────────────────────────────────────────────
     # Public API
@@ -225,23 +227,28 @@ class ScopeMatrixClient:
         never populated successfully OR the cache exceeded ``max_stale_age``
         with the last refresh in error.
         """
+        now = _now()
+        should_refresh = False
         async with self._lock:
             tool_map = self._state.tool_map
             fetched_at = self._state.fetched_at
             last_err = self._state.last_err
             next_refresh_at = self._state.next_refresh_at
 
-        now = _now()
-        if fetched_at is not None:
-            age = now - fetched_at
-        else:
-            age = timedelta.max
-
-        expired = age > self._ttl
-        if expired and (next_refresh_at is None or now > next_refresh_at):
-            if not self._refreshing:
+            age = (now - fetched_at) if fetched_at is not None else timedelta.max
+            expired = age > self._ttl
+            # Check-and-set under the lock so concurrent callers can't both
+            # spawn a refresh task.
+            if (
+                expired
+                and (next_refresh_at is None or now > next_refresh_at)
+                and not self._refreshing
+            ):
                 self._refreshing = True
-                asyncio.create_task(self._background_refresh())
+                should_refresh = True
+
+        if should_refresh:
+            self._refresh_task = asyncio.create_task(self._background_refresh())
 
         if tool_map is None and last_err is not None:
             raise last_err
@@ -262,20 +269,26 @@ class ScopeMatrixClient:
         (PRM builder) should fall back to ``cfg.supported_scopes`` in that
         case so the server still serves a metadata document at boot.
         """
+        now = _now()
+        should_refresh = False
         async with self._lock:
             scopes = self._state.scopes_supported
             fetched_at = self._state.fetched_at
             last_err = self._state.last_err
             next_refresh_at = self._state.next_refresh_at
 
-        now = _now()
-        age = (now - fetched_at) if fetched_at is not None else timedelta.max
-
-        expired = age > self._ttl
-        if expired and (next_refresh_at is None or now > next_refresh_at):
-            if not self._refreshing:
+            age = (now - fetched_at) if fetched_at is not None else timedelta.max
+            expired = age > self._ttl
+            if (
+                expired
+                and (next_refresh_at is None or now > next_refresh_at)
+                and not self._refreshing
+            ):
                 self._refreshing = True
-                asyncio.create_task(self._background_refresh())
+                should_refresh = True
+
+        if should_refresh:
+            self._refresh_task = asyncio.create_task(self._background_refresh())
 
         # Same stale-then-error rule as get_cached: never serve data older
         # than max_stale_age with a known error condition.

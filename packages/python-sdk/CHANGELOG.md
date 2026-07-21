@@ -1,6 +1,84 @@
 # Changelog — authsec-sdk (Python)
 
-## 4.4.3 — Tighten header sanitizer for non-ASCII bytes
+## 4.7.2 — JWT clock-skew leeway
+
+### Fixed
+- **30-second clock-skew tolerance** on JWT validation — tokens issued by a
+  server whose clock is slightly ahead or behind are no longer rejected as
+  expired/not-yet-valid within a 30-second window
+
+## 4.7.1 — mount_mcp works out of the box with mcp >= 1.27
+
+**E2E-verified against the live AuthSec server (2026-07-15): the documented
+one-line `mount_mcp` server, ID-JAG delegation (including live revocation),
+and M2M client-secret + private-key-JWT all pass.**
+
+### Fixed
+- **`mount_mcp` auto-configures FastMCP instances** — the documented
+  `mount_mcp(app, "/mcp", mcp, cfg)` one-liner now works unmodified with
+  `mcp >= 1.27`:
+  - starts the StreamableHTTP session manager with the host app's lifecycle
+    (was: `500 Task group is not initialized` on every request); a
+    caller-managed `session_manager.run()` lifespan is detected and honored
+  - enables stateless JSON responses so direct JSON-RPC POSTs work without
+    an `initialize` handshake (was: `400 Bad Request`)
+  - appends the host from `cfg.resource_uri` to FastMCP's DNS-rebinding
+    allow-list so requests via the server's public URL are accepted
+    (was: `421 Invalid Host header`); protection stays enabled and
+    caller-provided `transport_security` entries are preserved
+- **`tools/list` scope filtering no longer corrupts responses** — the filtered
+  body was sent with the original response's stale `Content-Length`, causing
+  uvicorn to abort the connection (`Response content longer than
+  Content-Length`); the header is now recomputed
+
+## 4.7.0 — Three M2M auth methods, package restructure, security hardening
+
+**E2E-verified against the live AuthSec server (2026-07-05): ID-JAG delegation
+and all three M2M methods pass.**
+
+### Added
+- **Three interchangeable M2M credential classes** (`authsec_sdk.identity.credentials`),
+  all usable via `AgentIdentity(issuer, client_id, auth=...)`:
+  - `ClientSecretAuth` — HTTP Basic (`client_secret_basic`)
+  - `PrivateKeyJwtAuth` — RFC 7523 signed assertion (RS256, `kid`, 5-min
+    single-use `jti`, audience-bound); accepts a PEM string or file path
+  - `SpiffeSvidAuth` — SPIFFE JWT-SVID client assertion
+- `py.typed` (PEP 561) — type checkers now see all hints
+- Documentation suite: `docs/` (MCP protection, M2M auth, ID-JAG delegation —
+  step-by-step with dashboard screenshots); README rewritten
+
+### Changed — package restructure (old imports keep working through v4)
+- `agent_identity.py` → `identity/agent.py`; `spiffe_identity.py` → `identity/spiffe.py`
+- `core.py` → `_legacy/core.py`; `ciba_sdk.py` → `ciba.py`;
+  `delegation_sdk.py` → `delegation.py`; `spire_sdk.py` → `spiffe/spire.py`
+- `spiffe_workload_api/` → `spiffe/` (client → `workload_api_client.py`,
+  `simple` → `quick_start_svid.py`); `client/langgraph.py` → `integrations/langgraph.py`
+- Every old path remains as a deprecation shim emitting `DeprecationWarning`;
+  removal planned for v5
+
+### Fixed
+- `browser_login`: OAuth `state` validation (CSRF), `resource` indicator
+  (RFC 8707) in both auth URL and token exchange, default scopes fixed to
+  `openid email profile`, login timeout, port-in-use error, auth URL always
+  printed for headless use
+- `_discover_prm`: correct RFC 9728 path construction (resource path suffix)
+- `poll_until_approved`: no longer clears the ID-JAG cache before the final
+  token call; nil-UUID pending entries ignored (server-side bug workaround)
+- Token requests with assertion-based auth now include `client_id` in the body
+- Scope matrix: refresh race fixed (check-and-set inside the lock); background
+  refresh task no longer garbage-collected; TTL default aligned to 30 s
+- Validator: JWT/JWKS verification moved off the event loop; pooled
+  introspection HTTP session
+- Delegation: `request()` returns a `DelegationResponse` with a pre-read body
+  (was returning a closed aiohttp response)
+- CORS in legacy server: configurable allowlist via `AUTHSEC_CORS_ORIGINS`
+- `Config.introspection_client_secret` no longer appears in `repr()`
+
+### Removed
+- `preferred_mode="xaa-only"` (Python-only divergence from the TS SDK; caused
+  ghost pending requests). Use `"xaa-allowed"`.
+
+
 
 **Follow-up to 4.4.2 sanitizer.** The H-1 fix stripped CR / LF / NUL but
 allowed everything ≥ 0x80 through. ASGI/uvicorn also rejects non-ASCII bytes
