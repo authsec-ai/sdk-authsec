@@ -145,7 +145,7 @@ from .identity import (
     SpiffeTokenExchangeError,
 )
 
-__version__ = "4.7.2"
+__version__ = "4.7.3"
 __all__ = [
     # ── Runtime SDK (modern) — TypeScript-parity additions ────────────────
     "Config",
