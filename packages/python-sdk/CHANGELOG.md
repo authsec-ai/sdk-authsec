@@ -1,6 +1,6 @@
 # Changelog — authsec-sdk (Python)
 
-## Unreleased
+## 4.7.3 — Tool-error handler, FastMCP auto-inventory, MANIFEST fix
 
 ### Fixed
 - Restored the public ``authsec_tool_error_handler`` export after the

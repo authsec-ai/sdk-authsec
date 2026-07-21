@@ -597,6 +597,6 @@ pytest tests/test_runtime.py tests/test_config_flow.py   # unit tests
 
 ## Versioning
 
-Current: **4.7.2** (adds the three M2M client-auth methods —
+Current: **4.7.3** (adds the three M2M client-auth methods —
 `ClientSecretAuth`, `PrivateKeyJwtAuth`, `SpiffeSvidAuth`). Deprecated
 import paths (see table above) are kept throughout v4 and removed in v5.
