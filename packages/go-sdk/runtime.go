@@ -344,41 +344,139 @@ func (rt *Runtime) AuthorizeTool(ctx context.Context, principal *Principal, tool
 
 // Wrap wraps the given handler with full MCP enforcement: auth, tool authorization,
 // tools/list filtering, batch handling, and fail-closed parse behavior.
+//
+// The body is read and classified BEFORE the auth decision so the SDK can
+// mirror the Python/TS runtime's MCP-client-aware behavior:
+//   - MCP handshake requests (initialize / notifications/initialized / ping)
+//     pass through when a token is present but invalid, so a session survives a
+//     mid-session token expiry.
+//   - tools/call and generic JSON-RPC auth denials are returned in-band as
+//     JSON-RPC responses (HTTP 200) when a token is present and the body is
+//     JSON-RPC; otherwise a standard HTTP 401/403 challenge is returned.
+//
+// Requests with no token, non-JSON-RPC bodies, and 503 (policy unavailable)
+// keep the classic HTTP-status behavior. The standalone AuthMiddleware is
+// unchanged — this parity behavior lives only in the MCP-aware Wrap path.
 func (rt *Runtime) Wrap(next http.Handler) http.Handler {
-	auth := rt.AuthMiddleware()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isMetadataRequest(rt.cfg.ResourceURI, r.URL.Path) {
 			rt.ProtectedResourceHandler().ServeHTTP(w, r)
 			return
 		}
 
-		auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body, result := parseMCPRequestBody(r)
+		// Parse the bearer token. A malformed header (present, but not a valid
+		// Bearer value) preserves the historical 400 behavior; a missing header
+		// yields an empty token that flows into the denial path below.
+		token, tokErr := parseBearerToken(r)
+		if tokErr != nil && tokErr != errMissingAuthorization {
+			http.Error(w, tokErr.Error(), http.StatusBadRequest)
+			return
+		}
 
-			// Fail-closed: non-empty body that couldn't be parsed → 400.
-			if result.parseErr != nil {
-				http.Error(w, "Bad Request: "+result.parseErr.Error(), http.StatusBadRequest)
-				return
-			}
+		// Read the body once; it is needed for both the denial and the
+		// authenticated paths.
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			http.Error(w, "Bad Request: failed to read request body", http.StatusBadRequest)
+			return
+		}
 
-			// Non-POST or empty body: pass through without tool enforcement.
-			if result.isEmpty {
-				next.ServeHTTP(w, r)
-				return
-			}
+		// Validate the token (if any). A nil principal means the request is
+		// unauthenticated or the token is invalid/expired/wrong-audience.
+		var principal *Principal
+		var validErr error
+		if token != "" {
+			principal, validErr = rt.validator.Validate(r.Context(), token)
+		}
 
-			// Restore body for downstream handlers.
+		if principal == nil {
+			rt.handleAuthDenial(w, r, next, token, body, validErr)
+			return
+		}
+
+		// ── Authenticated path ───────────────────────────────────────────────
+		r = r.WithContext(WithPrincipal(r.Context(), principal))
+
+		result := parseMCPEnvelopesStrict(r.Method, body)
+		// Fail-closed: non-empty body that couldn't be parsed → 400.
+		if result.parseErr != nil {
+			http.Error(w, "Bad Request: "+result.parseErr.Error(), http.StatusBadRequest)
+			return
+		}
+		// Non-POST or empty body: pass through without tool enforcement.
+		if result.isEmpty {
 			r.Body = io.NopCloser(bytes.NewReader(body))
+			next.ServeHTTP(w, r)
+			return
+		}
 
-			principal, _ := PrincipalFromContext(r.Context())
+		// Restore body for downstream handlers.
+		r.Body = io.NopCloser(bytes.NewReader(body))
 
-			if !result.isBatch {
-				rt.handleSingleMCPRequest(w, r, next, principal, result.envelopes[0])
-				return
-			}
-			rt.handleBatchMCPRequest(w, r, next, principal, result.envelopes)
-		})).ServeHTTP(w, r)
+		if !result.isBatch {
+			rt.handleSingleMCPRequest(w, r, next, principal, result.envelopes[0])
+			return
+		}
+		rt.handleBatchMCPRequest(w, r, next, principal, result.envelopes)
 	})
+}
+
+// handleAuthDenial handles a request whose token is missing or invalid. It
+// mirrors the initial-denial branch of Python's _protected:
+//   - handshake pass-through (token present + JSON-RPC + all-handshake body),
+//   - in-band JSON-RPC / tools/call errors (token present + JSON-RPC),
+//   - standard HTTP 401 challenge otherwise (no token, or non-JSON-RPC body).
+func (rt *Runtime) handleAuthDenial(
+	w http.ResponseWriter,
+	r *http.Request,
+	next http.Handler,
+	token string,
+	body []byte,
+	validErr error,
+) {
+	description := "missing bearer token"
+	if token != "" {
+		if validErr != nil {
+			description = validErr.Error()
+		} else {
+			description = "invalid bearer token"
+		}
+	}
+	reason := classifyAuthReason(description)
+	code := "invalid_token"
+	if strings.Contains(strings.ToLower(description), "audience") {
+		code = "invalid_audience"
+	}
+
+	envelopes, isBatch, isJSONRPC := parseMCPEnvelopesTolerant(r.Method, body)
+	tokenPresent := token != ""
+
+	// Handshake pass-through: let the session-setup handshake reach the handler
+	// so an MCP session survives a mid-session token expiry.
+	if tokenPresent && isJSONRPC && isHandshakeEnvelopes(envelopes) {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// In-band JSON-RPC error (only when a token was presented).
+	if tokenPresent && isJSONRPC {
+		d := inbandDenial{
+			status:      http.StatusUnauthorized,
+			code:        code,
+			description: description,
+			reason:      reason,
+		}
+		if isToolsCallEnvelopes(envelopes) {
+			writeInbandToolAuthError(w, envelopes, isBatch, d)
+			return
+		}
+		writeInbandJSONRPCError(w, envelopes, isBatch, d)
+		return
+	}
+
+	// Standard HTTP challenge (no token, or non-JSON-RPC caller).
+	rt.writeUnauthorizedReason(w, description, reason)
 }
 
 func (rt *Runtime) handleSingleMCPRequest(
@@ -391,7 +489,7 @@ func (rt *Runtime) handleSingleMCPRequest(
 	switch req.Method {
 	case "tools/call":
 		if err := rt.AuthorizeTool(r.Context(), principal, req.Params.Name); err != nil {
-			rt.dispatchAuthError(w, err)
+			rt.dispatchToolDenial(w, err, []*mcpEnvelope{req}, false, envelopesAreJSONRPC([]*mcpEnvelope{req}))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -411,13 +509,17 @@ func (rt *Runtime) handleBatchMCPRequest(
 	principal *Principal,
 	envelopes []*mcpEnvelope,
 ) {
+	isJSONRPC := envelopesAreJSONRPC(envelopes)
+
 	// Pre-flight: check authorization for all tools/call in the batch.
 	for _, env := range envelopes {
 		if env.Method != "tools/call" {
 			continue
 		}
 		if err := rt.AuthorizeTool(r.Context(), principal, env.Params.Name); err != nil {
-			rt.dispatchAuthError(w, err) // 503 or 403, whole batch fails
+			// Whole batch fails. In-band (200) for scope denials on JSON-RPC
+			// clients; HTTP 503 for policy-unavailable (mirrors Python).
+			rt.dispatchToolDenial(w, err, envelopes, true, isJSONRPC)
 			return
 		}
 	}
@@ -441,18 +543,45 @@ func (rt *Runtime) handleBatchMCPRequest(
 	next.ServeHTTP(w, r)
 }
 
-// dispatchAuthError routes ErrPolicyUnavailable to 503 and ErrInsufficientScope to 403.
-func (rt *Runtime) dispatchAuthError(w http.ResponseWriter, err error) {
+// dispatchToolDenial routes a tools/call authorization failure.
+//
+//   - ErrPolicyUnavailable → HTTP 503 always (not an OAuth failure; 503 is
+//     outside the in-band set, matching Python's status ∈ {401,403} gate).
+//   - ErrInsufficientScope → in-band tools/call error (HTTP 200) when the caller
+//     is a JSON-RPC MCP client; otherwise the classic HTTP 403 challenge.
+//
+// envelopes carries the request(s) so the in-band response echoes the correct
+// JSON-RPC id(s); for a batch, every item is rendered as an error result.
+func (rt *Runtime) dispatchToolDenial(
+	w http.ResponseWriter,
+	err error,
+	envelopes []*mcpEnvelope,
+	isBatch bool,
+	isJSONRPC bool,
+) {
 	var policyErr ErrPolicyUnavailable
 	var scopeErr ErrInsufficientScope
 	if errors.As(err, &policyErr) {
 		rt.writePolicyUnavailable(w)
-	} else if errors.As(err, &scopeErr) {
-		rt.writeInsufficientScope(w, scopeErr)
-	} else if err != nil {
-		// Unexpected error type: fail closed as 503.
-		rt.writePolicyUnavailable(w)
+		return
 	}
+	if errors.As(err, &scopeErr) {
+		if isJSONRPC {
+			writeInbandToolAuthError(w, envelopes, isBatch, inbandDenial{
+				status:         http.StatusForbidden,
+				code:           "insufficient_scope",
+				description:    scopeErr.Error(),
+				tool:           scopeErr.ToolName,
+				requiredScopes: scopeErr.RequiredScopes,
+				grantedScopes:  scopeErr.GrantedScopes,
+			})
+			return
+		}
+		rt.writeInsufficientScope(w, scopeErr)
+		return
+	}
+	// Unexpected error type: fail closed as 503.
+	rt.writePolicyUnavailable(w)
 }
 
 func (rt *Runtime) writeUnauthorized(w http.ResponseWriter) {
@@ -472,7 +601,8 @@ func (rt *Runtime) writeUnauthorizedReason(w http.ResponseWriter, description, r
 		description = "Unauthorized"
 	}
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-		`Bearer error="invalid_token", resource_metadata=%q, error_description=%q`,
+		`Bearer realm=%q, error="invalid_token", resource_metadata=%q, error_description=%q`,
+		rt.cfg.ResourceName,
 		BuildResourceMetadataURL(rt.cfg.ResourceURI),
 		description,
 	))
@@ -516,7 +646,8 @@ func (rt *Runtime) writeInsufficientScope(w http.ResponseWriter, e ErrInsufficie
 	}
 	description := e.Error()
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-		`Bearer error="insufficient_scope", scope=%q, resource_metadata=%q, error_description=%q`,
+		`Bearer realm=%q, error="insufficient_scope", scope=%q, resource_metadata=%q, error_description=%q`,
+		rt.cfg.ResourceName,
 		scopeStr,
 		BuildResourceMetadataURL(rt.cfg.ResourceURI),
 		description,
@@ -819,43 +950,40 @@ type mcpParseResult struct {
 	isEmpty   bool
 }
 
-// parseMCPRequestBody reads and parses the request body, handling both single
-// JSON-RPC objects and batch arrays. A non-empty body that cannot be parsed
-// as valid JSON-RPC sets parseErr (fail-closed: 400 Bad Request).
-func parseMCPRequestBody(r *http.Request) ([]byte, mcpParseResult) {
-	if r.Method != http.MethodPost {
-		return nil, mcpParseResult{isEmpty: true}
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, mcpParseResult{parseErr: fmt.Errorf("failed to read request body: %w", err)}
-	}
-
-	if len(bytes.TrimSpace(body)) == 0 {
-		return body, mcpParseResult{isEmpty: true}
+// parseMCPEnvelopesStrict parses an already-read request body, handling both
+// single JSON-RPC objects and batch arrays. A non-empty body that cannot be
+// parsed as valid JSON-RPC sets parseErr (fail-closed: 400 Bad Request). This
+// is the authenticated-path parser; the denial path uses the tolerant variant
+// in mcp_inband.go.
+func parseMCPEnvelopesStrict(method string, body []byte) mcpParseResult {
+	if method != http.MethodPost {
+		return mcpParseResult{isEmpty: true}
 	}
 
 	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) > 0 && trimmed[0] == '[' {
+	if len(trimmed) == 0 {
+		return mcpParseResult{isEmpty: true}
+	}
+
+	if trimmed[0] == '[' {
 		// JSON-RPC batch request.
 		var batch []mcpEnvelope
 		if err := json.Unmarshal(body, &batch); err != nil {
-			return body, mcpParseResult{parseErr: fmt.Errorf("invalid JSON-RPC batch: %w", err)}
+			return mcpParseResult{parseErr: fmt.Errorf("invalid JSON-RPC batch: %w", err)}
 		}
 		envelopes := make([]*mcpEnvelope, len(batch))
 		for i := range batch {
 			envelopes[i] = &batch[i]
 		}
-		return body, mcpParseResult{envelopes: envelopes, isBatch: true}
+		return mcpParseResult{envelopes: envelopes, isBatch: true}
 	}
 
 	// Single JSON-RPC object.
 	var req mcpEnvelope
 	if err := json.Unmarshal(body, &req); err != nil {
-		return body, mcpParseResult{parseErr: fmt.Errorf("invalid JSON-RPC request: %w", err)}
+		return mcpParseResult{parseErr: fmt.Errorf("invalid JSON-RPC request: %w", err)}
 	}
-	return body, mcpParseResult{envelopes: []*mcpEnvelope{&req}}
+	return mcpParseResult{envelopes: []*mcpEnvelope{&req}}
 }
 
 var errMissingAuthorization = fmt.Errorf("missing required Authorization header")

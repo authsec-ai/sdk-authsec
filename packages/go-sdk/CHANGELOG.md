@@ -1,5 +1,93 @@
 # Changelog — github.com/authsec-ai/sdk-authsec/packages/go-sdk
 
+## v0.6.0 — M2M credential types + ID-JAG login/poll (Python parity)
+
+Brings the agent-side identity surface toward parity with the Python SDK.
+Additive and backward compatible — no exported symbol was removed or changed.
+No new dependencies (`golang-jwt/jwt/v5` was already required).
+
+**M2M — pluggable client authentication.** `AgentIdentity` now authenticates
+through a `ClientAuth` abstraction, so agents can use any of:
+
+- `ClientSecretAuth` — `client_secret_basic` (unchanged behavior; still the
+  `ClientSecret` shorthand).
+- `PrivateKeyJwtAuth` — `private_key_jwt` (RFC 7523): a freshly signed RS256
+  assertion (5-min lifetime, single-use `jti`, audience = token endpoint). Key
+  loaded from PEM content or a file path.
+- `SpiffeSvidAuth` — a pre-held SPIFFE JWT-SVID sent as `client_assertion`.
+
+`AgentIdentityConfig` gains an `Auth ClientAuth` field. It is mutually exclusive
+with `ClientSecret`; setting both panics in `NewAgentIdentity`. Assertion-based
+methods (private_key_jwt / SPIFFE) now also apply on the requester-bootstrap and
+token-exchange calls, so the XAA/ID-JAG flow works for non-secret clients.
+
+**M2M — Kubernetes workload identity.** New `SpiffeWorkloadIdentity` +
+`SpiffeConfig`: discovers the token endpoint from the MCP server URL (PRM → AS
+metadata, using the RFC 9728 alias path), fetches a JWT-SVID from the local
+SPIRE agent (`spire-agent api fetch jwt`), exchanges it for a Bearer token, and
+caches both. Actionable typed errors: `SpiffeIdentityError`,
+`SpiffeSvidFetchError`, `SpiffeTokenExchangeError`. `SvidOverride` skips the
+SPIRE subprocess for testing.
+
+**ID-JAG — login + approval helpers.**
+
+- `BrowserLogin` — interactive OAuth PKCE login returning an `id_token`, ready to
+  pass as `WithUserSession(idToken)` to `AccessFor`. The browser launcher is
+  injectable (`BrowserLoginOptions.OpenBrowser`) for testing.
+- `PollUntilApproved` + `PollOptions` — poll an access-request `status_url` after
+  a `*PendingApprovalError` until approved (then mint a token), denied, revoked,
+  cancelled, or timed out.
+
+**Examples:** `examples/agent-m2m` (all four M2M methods) and
+`examples/agent-idjag` (browser login → access_for → poll).
+
+**Deferred to a later phase (unchanged this round):** `DelegationClient`
+(delegated JWT-SVID pull) and the SPIFFE Workload API (X.509-SVID / gRPC).
+
+**Known limitation (pre-existing, not addressed here):** `AgentIdentity`'s
+client-side PRM discovery fetches the *bare* `/.well-known/oauth-protected-resource`
+path, while a Go-protected path-based resource (e.g. `/mcp`) serves PRM only at
+the alias (`/.well-known/oauth-protected-resource/mcp`). `SpiffeWorkloadIdentity`
+added here uses the correct alias (`BuildResourceMetadataURL`); `AgentIdentity`
+still uses the bare path. Tracked as a follow-up.
+
+## v0.5.0 — MCP-client behavior parity with the Python/TS SDKs
+
+Brings the `Wrap` request path to parity with the Python and TypeScript
+runtimes. No exported API was removed or changed; `MountMCP`, `WrapMCPHTTP`,
+`NewRuntime`, `Runtime.Wrap`, `AuthMiddleware`, and `ProtectedResourceHandler`
+keep their signatures. No new dependencies.
+
+**New behavior in `Wrap` (MCP-aware path only):**
+
+- **MCP handshake pass-through.** When a token is *present but invalid*
+  (e.g. expired mid-session), `initialize` / `notifications/initialized` /
+  `ping` now pass through to the wrapped handler so the MCP session survives a
+  token refresh. Unauthenticated (no token) handshake requests are still
+  challenged with `401`.
+- **In-band JSON-RPC errors.** For JSON-RPC callers with a token present,
+  `tools/call` and other auth denials are now returned **in-band** as JSON-RPC
+  responses (HTTP `200` with `result.isError=true` + `_meta.authsec`, or a
+  JSON-RPC `error` object with code `-32003`/`-32001`) so MCP clients surface a
+  structured, readable error. Batch requests return an array of in-band results.
+
+**⚠️ Behavior change to note.** A `tools/call` from a JSON-RPC client with a
+valid-but-underscoped token previously returned **HTTP 403**; it now returns an
+in-band `200` (`isError=true`, `_meta.authsec.error="insufficient_scope"`).
+Non-JSON-RPC callers (no `jsonrpc:"2.0"`) still receive the classic HTTP `403`
+challenge, and policy-unavailable still returns HTTP `503`. Consumers that
+scripted against the raw `403` should read `_meta.authsec` instead.
+
+**Other parity additions (non-breaking):**
+
+- `WWW-Authenticate` challenges now include `realm="<ResourceName>"` alongside
+  the existing `resource_metadata=` (RFC 9728) attribute.
+- The protected-resource metadata response sets `Cache-Control: public, max-age=300`.
+- **New `FromEnv(prefix ...string) Config`** builds a `Config` from `AUTHSEC_*`
+  environment variables (with the dashboard's legacy aliases), mirroring the
+  Python SDK's `from_env`. It parses only — call `NewRuntime`/`Config.Validate`
+  to fail loudly on a bad config.
+
 ## v0.4.0 — Actionable client error helpers + richer server denials
 
 **New `client` package** — import `github.com/authsec-ai/sdk-authsec/packages/go-sdk/client`
